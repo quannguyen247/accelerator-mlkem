@@ -1,0 +1,49 @@
+# Python and editor state
+.venv/
+__pycache__/
+*.py[cod]
+.vscode/
+
+# Vivado generated state and products; keep XPR, Tcl and packaged IP sources.
+.Xil/
+*.cache/
+*.hw/
+*.gen/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.srcs/
+*.ioplanning/
+*.jou
+*.log
+*.log.bak
+*.str
+*.pb
+*.rpt
+*.dcp
+*.bit
+*.bin
+*.ltx
+*.xsa
+/clockInfo.txt
+/tight_setup_hold_pins.txt
+/cong/
+build/
+
+# Questa, Icarus and other simulator output
+work/
+modelsim.ini
+transcript
+*.wlf
+*.wdb
+*.vcd
+*.vvp
+
+# Keep the default simulation vectors; other generated vector files stay local.
+vector/*
+!vector/*.py
+!vector/tv_hdr.mem
+!vector/tv_in.mem
+!vector/tv_out.mem
+!vector/tv_seed.mem
+!vector/tv_spec.txt
