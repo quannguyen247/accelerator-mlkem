@@ -210,3 +210,20 @@ Release verification is closed only when:
 
 Simulation PASS is not timing, power, FPGA, ASIC, or FIPS signoff.
 
+
+## 11. Current Evidence (non-UVM route)
+
+The first regression follows the "initial route without UVM" of SPEC section 5.
+
+| Item | Status | Reproduce |
+|---|---|---|
+| Golden model | `vector/mlkem_gen.py`, written from FIPS 203; cross-checked against the independent `kyber-py` package for all parameter sets (KeyGen, Encaps, Decaps, implicit rejection). Confirms the NTT IP scaling and the Compress/Montgomery constants exhaustively. | `python3 Implementation/vector/mlkem_gen.py N` |
+| Core regression | `tb_mlkem_core`: 3 operations × 3 sets, implicit rejection, invalid `ek`, wrong `H(ek)` in `dk`, early `TLAST`, ABORT, invalid configuration, recovery; random backpressure on both streams; all words, `TKEEP` and `TLAST` compared. | `make test STALL=<pct> SEED=<n> N=<keys per set>` |
+| IP top | `tb_mlkem_axi`: requests through the register map and streams, SLVERR rules, error codes 1/2/4/6, ACK lifecycle, READY low during the post-reset clear. | `make test-axi` |
+| Performance | Cycle counts per request with always-ready streams; engine timelines. | `make perf`, `make trace` |
+| Lint | Verilator `-Wall` clean for the new RTL (three warning classes are disabled because they occur only inside the reused NTT/Keccak IPs). | `make lint` |
+
+Not yet covered: UVM environment, assertions/formal properties, functional and
+code coverage collection, gate-level simulation, the SoC/DMA firmware test and
+board runs. The bench checks outputs, not the absence of secrets in cleared
+memories.

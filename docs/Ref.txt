@@ -1,0 +1,125 @@
+30 DOI về kiến trúc KEM ML-KEM / CRYSTALS-Kyber (2020–2026)
+
+Phạm vi: H = phần cứng thực hiện KeyGen, Encaps, Decaps; S = SoC HW/SW thực hiện đủ ba phép, có tăng tốc phần cứng. Những bài chỉ làm NTT, CT-BU, codec, hash, hoặc chỉ Encaps/Decaps đã bị loại. Dấu * chỉ đặt khi chính thiết kế KEM/SoC hoàn chỉnh được báo cáo diện tích/tài nguyên, tốc độ/độ trễ và công suất/năng lượng trên cùng nền tảng. Công suất ước lượng được phân biệt với số đo chip. Bài Kyber tiền FIPS 203 là tham khảo kiến trúc, không tự động chứng minh tương thích FIPS 203.
+
+Theo tiêu chí đã chốt, [15] là bài KEM hoàn chỉnh có đủ PPA trên Artix-7. Các bài [01], [02], [08] có tài nguyên/timing Artix-7 nhưng không báo cáo công suất cùng thiết kế; chúng vẫn hữu ích về kiến trúc. Chưa xác lập bài báo KEM trên KV260. Không lấy PPA NTT để bù cho PPA KEM.
+
+01. DOI: 10.46586/tches.v2021.i2.328-356 | H | Artix-7
+    A Compact Hardware Implementation of CCA-Secure Key Exchange Mechanism CRYSTALS-KYBER on FPGA
+    Xing và Li: lõi CCA-KEM đủ KeyGen/Encaps/Decaps, dùng chung NTT, Keccak và bộ nhớ. Bài báo có LUT/FF/BRAM/DSP, tần số và chu kỳ cho cả ba mức Kyber; bản bài báo không có công suất.
+
+02. DOI: 10.1109/TC.2022.3222954 | H | Artix-7, Zynq UltraScale+
+    High-Speed Hardware Architectures and FPGA Benchmarking of CRYSTALS-Kyber, NTRU, and Saber
+    Dang, Mohajerani và Gaj so sánh các KEM đầy đủ ở cùng quy trình FPGA; hữu ích cho lịch thực thi và điểm đánh đổi bộ nhớ/song song. Không thấy bảng công suất của thiết kế Kyber hoàn chỉnh.
+
+03. DOI: 10.1109/TCSI.2021.3106639 | H | Artix-7
+    Instruction-Set Accelerated Implementation of CRYSTALS-Kyber
+    Bisheh-Niasar và cộng sự dùng kiến trúc theo lệnh để thực hiện KeyGen/Encaps/Decaps và so sánh area–time trên FPGA. Bảng tài nguyên/timing không đủ cột công suất KEM để đánh dấu *.
+
+04. DOI: 10.1109/TCSI.2022.3219555 | H | ZCU102, ASIC
+    KaLi: A Crystal for Post-Quantum Security Using Kyber and Dilithium
+    Bộ đồng xử lý chia sẻ đa thức, lấy mẫu và băm giữa Kyber KEM và Dilithium; hỗ trợ ba phép KEM và các mức an toàn. Dùng để tham khảo chia sẻ tài nguyên, không nhập số PPA của nó làm mục tiêu KV260.
+
+05. DOI: 10.1109/TC.2023.3296899 | H | Artix-7, Zynq UltraScale+
+    HPKA: A High-Performance CRYSTALS-Kyber Accelerator Exploring Efficient Pipelining
+    Ni và cộng sự cân bằng pipeline giữa các khối cho KeyGen/Encaps/Decaps. Có báo cáo tài nguyên và độ trễ KEM trên FPGA; chưa xác nhận công suất cùng cấu hình.
+
+06. DOI: 10.1109/TCSII.2021.3103184 | H | Artix-7
+    An Efficient Implementation of KYBER
+    Thiết kế KEM dùng chung datapath đa thức, báo cáo chu kỳ và tài nguyên cho cả ba phép. Chưa xác nhận power của lõi hoàn chỉnh.
+
+07. DOI: 10.1109/TCSI.2023.3306347 | H | Artix-7
+    Highly-Efficient Hardware Architecture for CRYSTALS-Kyber With a Novel Conflict-Free Memory Access Pattern
+    Tổ chức truy cập bộ nhớ tránh xung đột cho kiến trúc Kyber đầy đủ; báo cáo KeyGen/Encaps/Decaps và area–time. Power của KEM hoàn chỉnh chưa được xác nhận.
+
+08. DOI: 10.1109/TCSI.2024.3443238 | H | Artix-7
+    Efficient Hardware Implementation of the Lightweight CRYSTALS-Kyber
+    Lõi gọn cho IoT: 5.487 LUT, 3.426 FF, 3,5 BRAM, 2 DSP, 185 MHz; có chu kỳ KeyGen/Encaps/Decaps cho cả ba mức. IEEE không báo cáo power của cùng lõi.
+
+09. DOI: 10.1109/TCSII.2024.3382772 | H | Zynq UltraScale+, ASIC 40 nm
+    Super-K: A Superscalar CRYSTALS-KYBER Processor Based on Efficient Arithmetic Array
+    Bộ xử lý Kyber phát hành nhiều lệnh, tái cấu hình mảng toán để phục vụ các pha KEM. Cần đọc bảng power gốc trước khi dùng làm mốc PPA đầy đủ.
+
+10. DOI: 10.1109/TCSII.2024.3442228 | H | Artix-7
+    A Configurable ML-KEM/Kyber Key-Encapsulation Hardware Accelerator Architecture
+    Kiến trúc cấu hình được KeyGen/Encaps/Decaps, NTT/INTT và bộ nhớ dùng chung. IEEE nêu area–time cho ba mức; chưa xác nhận power cùng thiết kế.
+
+11. DOI: 10.1109/TCSI.2025.3547799 | H | Artix-7
+    Instruction-Based High-Performance Hardware Controller of CRYSTALS-Kyber With Balanced Resource Utilization
+    Điều khiển theo lệnh và phân phối tài nguyên cho kiến trúc Kyber; tham khảo ranh giới sequencer/dispatcher và scheduling. Power KEM đầy đủ chưa kiểm được.
+
+12. DOI: 10.1109/TC.2023.3320040 | H | Artix-7
+    Split-Radix Based Compact Hardware Architecture for CRYSTALS-Kyber
+    Guo và Li dùng split-radix để giảm chi phí trong kiến trúc Kyber báo cáo KeyGen/Encaps/Decaps. Không coi số liệu NTT riêng là power KEM.
+
+13. DOI: 10.1109/OJCAS.2025.3591136 | H | Artix-7, ASIC 14 nm
+    Highly-Efficient Hardware Architecture for ML-KEM PQC Standard
+    ML-KEM ba mức với datapath đa thức, SHA-3 và bộ nhớ; Artix-7 có LUT/FF/BRAM/DSP và tốc độ. Chưa xác nhận power số cho cùng cấu hình nên không có *.
+
+14. * DOI: 10.1109/ACCESS.2025.3579379 | H | ASIC 180 nm
+    An Area-Time Efficient Hardware Architecture for ML-KEM Post-Quantum Cryptography Standard
+    Nguyen và cộng sự báo cáo ba phép ML-KEM; chip ASIC 180 nm có diện tích khoảng 160 kGE, 7,37 KB SRAM, tối đa 93 MHz và năng lượng đo cho các mức ML-KEM. Dấu * áp dụng cho ASIC, không phải power của bản Artix-7.
+
+15. * DOI: 10.1145/3708469 | H | Artix-7, Vivado 2020.1
+    A Highly Hardware Efficient ML-KEM Accelerator with Optimised Architectural Layers
+    Ni và cộng sự: KeyGen/Encaps/Decaps trên Artix-7; bản server-side ML-KEM-512 có 10.076 LUT, 8.227 FF, 0 BRAM, 4 DSP, 270 MHz và khoảng 0,469 W do Vivado ước lượng. Bảng 8/9 là PPA của kiến trúc đầy đủ.
+
+16. DOI: 10.46586/tches.v2024.i3.99-135 | S | FPGA SoC
+    Optimized Hardware-Software Co-Design for Kyber and Dilithium on RISC-V SoC FPGA
+    SoC RISC-V chạy Kyber KEM và Dilithium với tăng tốc phần cứng; hữu ích để đánh giá chi phí trao đổi CPU–accelerator. Chưa đối chiếu đủ power và tài nguyên trên cùng cấu hình.
+
+17. DOI: 10.7717/peerj-cs.2746 | H | Artix-7, Zynq UltraScale+
+    Efficient Unified Architecture for Post-Quantum Cryptography: Combining Dilithium and Kyber
+    Thiết kế chung các khối đa thức, sampling và codec, báo cáo KeyGen/Encaps/Decaps của Kyber; Artix-7 dùng 17,1k LUT, 6,6k FF, 4 DSP, 12,5 BRAM ở 160 MHz. Bài gốc không có power số của KEM.
+
+18. * DOI: 10.3390/electronics14152969 | H | ASIC 40 nm
+    High-Throughput Post-Quantum Cryptographic System: CRYSTALS-Kyber with Computational Scheduling and Architecture Optimization
+    Lõi Kyber thực hiện KeyGen/Encaps/Decaps; bài báo cho 3.183 kGE, 500 MHz, 0,57 nghìn chu kỳ cho tổng ba phép và 2.272,73 kOPS/W trên cùng bản 40 nm. Công suất suy ra từ thông lượng/hiệu suất năng lượng, không phải phép đo chip.
+
+19. DOI: 10.1109/JIOT.2025.3635477 | H | ASIC 22 nm
+    KEM-22: An Efficient Post-Quantum ML-KEM Hardware Accelerator on 22-nm ASIC
+    Lõi FIPS 203 hỗ trợ ML-KEM-512/768/1024 và báo cáo area–time, power/energy trong bài IEEE IoT Journal. Bản toàn văn và bảng số chưa kiểm được ở lượt này, nên chưa gắn *.
+
+20. * DOI: 10.1109/ACCESS.2025.3628733 | H | Zynq UltraScale+
+    High-Performance Unified Hardware Architecture for ML-DSA and ML-KEM PQC Standards
+    Thiết kế phần cứng đủ các pha ML-KEM/ML-DSA: 67,3k LUT, 23,7k FF, 16 DSP, 27,5 BRAM, 300 MHz, tổng power báo cáo 6,86 W trên Zynq UltraScale+. Đây là power cả kiến trúc dùng chung, không phải riêng KEM hay KV260.
+
+21. * DOI: 10.46586/tches.v2024.i2.130-153 | S | ASIC synthesis
+    A Highly-efficient Lattice-based Post-Quantum Cryptography Processor for IoT Applications
+    Bộ xử lý RISC-V/SIMD hoàn thành Kyber KEM qua HW/SW; tác giả báo cáo diện tích chip, số chu kỳ và power ước lượng 2,01 mW tại 200 MHz cho Kyber-512 trong cùng cấu hình silicon. Không phải lõi KEM thuần RTL.
+
+22. * DOI: 10.46586/tches.v2020.i4.239-280 | S | ASIC 65 nm
+    RISQ-V: Tightly Coupled RISC-V Accelerators for Post-Quantum Cryptography
+    SoC RISC-V tăng tốc Kyber KeyGen/Encaps/Decaps; báo cáo diện tích, chu kỳ và power/energy ASIC 65 nm cho giao dịch Kyber CCA. Kết quả là KEM HW/SW, không phải IP KEM tự trị.
+
+23. DOI: 10.46586/tches.v2022.i1.414-460 | S | RISC-V HW/SW
+    Masked Accelerators and Instruction Set Extensions for Post-Quantum Cryptography
+    Triển khai Kyber KEM đủ ba phép với masking, PRNG và ISA mở rộng; đo chi phí chu kỳ, kể cả decapsulation bảo vệ. Không đánh dấu * khi chưa gắn chắc power với cùng cấu hình KEM.
+
+24. * DOI: 10.5573/JSTS.2024.24.1.55 | H | ASIC 28 nm
+    A 1.03MOPS/W Lattice-based Post-quantum Cryptography Processor for IoT Devices
+    Bảng 3 của JSTS nêu ML-KEM-512 KeyGen+Encaps+Decaps: 5.794 chu kỳ, 83 MHz, 0,83 mm², 7,49 KB SRAM và 16–24 mW do PrimeTime ước lượng. Phần văn bản/bảng có vài số area/memory khác nhau; dùng số ở bảng khi trích.
+
+25. DOI: 10.1109/ESSERC62670.2024.10719541 | H | ASIC 40 nm
+    A 273μW 0.34mm² Efficient CRYSTALS-KYBER Processor for PQC Towards Edge Computing
+    ESSERC báo cáo chip Kyber KEM 0,34 mm², 253 kGE, 7 KB và điểm công suất thấp nhất 273 μW. Bảng so sánh trong bài khác nêu 270 MHz và khoảng 0,72 μJ/Op; chưa đối chiếu được các điểm làm việc trong toàn văn IEEE, nên không gắn *.
+
+26. DOI: 10.1109/CICC60959.2024.10528999 | H | ASIC 40 nm
+    A 40nm 1.26μJ/Op Energy-Efficient CRYSTALS-KYBER Post-Quantum Crypto-Processor with Comprehensive Side Channel Security Analysis and Countermeasures
+    Chip Kyber có đánh giá năng lượng và kênh kề; DOI và mức 1,26 μJ/Op được xác nhận. Chưa đối chiếu được bảng area/frequency cùng cấu hình, nên không đánh dấu *.
+
+27. DOI: 10.1109/A-SSCC58667.2023.10347915 | H | ASIC 40 nm
+    A 40nm 2.76μJ/Op Energy-Efficient Secure Post-Quantum Crypto-Processor for Crystals-Kyber on Module-LWE
+    Chip Kyber KEM được chế tạo; tóm tắt hội nghị xác nhận 2,76 μJ/Op. Bảng so sánh trong bài khác nêu 532 kGE, 14 KB, 115 MHz và 12 245 chu kỳ cho KeyGen+Encaps+Decaps. Chưa đối chiếu được toàn bộ PPA với bản IEEE gốc, nên không gắn *.
+
+28. * DOI: 10.3390/electronics15102154 | S | Zynq-7000, Vivado 2025.2
+    QUASAR: Achieving Quantum Readiness for Post-Quantum Cryptography on RISC-V at Minimum Hardware Cost
+    SoC RISC-V thực hiện ML-KEM-512/768/1024 với NTT và Keccak accelerator: tổng 5.487 LUT, 2.668 FF, 7 DSP, 21 BRAM, 110 MHz; Vivado ước lượng 42 mW power động toàn SoC (27 mW CPU + 15 mW PQC), ML-KEM-512 9,99 ms. Không phải Artix-7/KV260.
+
+29. * DOI: 10.7717/peerj-cs.4003 | H | Kintex-7
+    Two Birds, One Mask: Side-Channel-Resistant Unified Hardware for ML-DSA and ML-KEM
+    Lõi dùng chung có ML-KEM đầy đủ và masking: 42.152 LUT, 26.104 FF, 8 DSP, 34 BRAM, 102 MHz; Vivado ước lượng power động/tĩnh 0,896/0,119 W cho kiến trúc bảo vệ. Đây không phải power riêng của ML-KEM hay Artix-7.
+
+30. DOI: 10.46586/tches.v2026.i2.272-295 | H | FPGA, ASIC
+    A Framework for designing High-Order Side-Channel Protected Hardware Implementations of ML-KEM
+    HOPE-MLKEM là kiến trúc phần cứng mở hỗ trợ đủ mức an toàn và ba phép với bảo vệ kênh kề bậc cao. Giữ trong danh sách để tham khảo ranh giới bảo vệ, chưa gắn * khi chưa xác nhận power số của toàn lõi.
