@@ -1,0 +1,19 @@
+cases 18 in_words 4872 out_words 1808
+  0 op=0 set=0 err=0 in=0B out=2432B  ML-KEM-512#0 KeyGen
+  1 op=1 set=0 err=0 in=800B out=800B  ML-KEM-512#0 Encaps
+  2 op=2 set=0 err=0 in=2400B out=32B  ML-KEM-512#0 Decaps
+  3 op=2 set=0 err=0 in=2400B out=32B  ML-KEM-512#0 Decaps implicit-reject
+  4 op=1 set=0 err=3 in=800B out=0B  ML-KEM-512#0 Encaps invalid-ek
+  5 op=2 set=0 err=3 in=2400B out=0B  ML-KEM-512#0 Decaps bad-H(ek)
+  6 op=0 set=1 err=0 in=0B out=3584B  ML-KEM-768#0 KeyGen
+  7 op=1 set=1 err=0 in=1184B out=1120B  ML-KEM-768#0 Encaps
+  8 op=2 set=1 err=0 in=3488B out=32B  ML-KEM-768#0 Decaps
+  9 op=2 set=1 err=0 in=3488B out=32B  ML-KEM-768#0 Decaps implicit-reject
+ 10 op=1 set=1 err=3 in=1184B out=0B  ML-KEM-768#0 Encaps invalid-ek
+ 11 op=2 set=1 err=3 in=3488B out=0B  ML-KEM-768#0 Decaps bad-H(ek)
+ 12 op=0 set=2 err=0 in=0B out=4736B  ML-KEM-1024#0 KeyGen
+ 13 op=1 set=2 err=0 in=1568B out=1600B  ML-KEM-1024#0 Encaps
+ 14 op=2 set=2 err=0 in=4736B out=32B  ML-KEM-1024#0 Decaps
+ 15 op=2 set=2 err=0 in=4736B out=32B  ML-KEM-1024#0 Decaps implicit-reject
+ 16 op=1 set=2 err=3 in=1568B out=0B  ML-KEM-1024#0 Encaps invalid-ek
+ 17 op=2 set=2 err=3 in=4736B out=0B  ML-KEM-1024#0 Decaps bad-H(ek)
