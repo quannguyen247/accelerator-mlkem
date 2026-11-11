@@ -50,25 +50,26 @@ module mlkem_pmac (
     input wire [4*6-1:0] v_fill,
     input wire [3:0] v_ep,
 
-    // Results: T store (KeyGen) or lane buffers 4..8
-    output reg wr0_en,
-    output reg wr1_en,
-    output reg wr_t,
-    output reg [2:0] wr0_row,
-    output reg [2:0] wr1_row,
-    output reg [3:0] wr0_lane,
-    output reg [3:0] wr1_lane,
+    // Results, one registered strobe per destination. Port 0 carries the
+    // even row of a pair, port 1 the odd row:
+    //   wr_t_en[r]     T store slot r (KeyGen)
+    //   wr_lane_en[l]  buffer of lane l = 4..7 (ENC row l - 4)
+    //   wr_lane_en[8]  buffer of lane 8 (ENC row k, DEC), from port wr8_p1
+    //                  with epoch wr8_ep
+    output reg [3:0] wr_t_en,
+    output reg [8:4] wr_lane_en,
+    output reg wr8_p1,
+    output reg wr8_ep,
     output reg [4:0] wr_blk,
+    output reg wr_first,            // wr_blk == 0
     output reg [95:0] wr0_data,
-    output reg [95:0] wr1_data,
-    output reg wr0_ep,
-    output reg wr1_ep
+    output reg [95:0] wr1_data
 );
 
     `include "mlkem_funcs.vh"
 
     localparam LANE_LAT = 15;
-    localparam DRAIN = 20;
+    localparam DRAIN = 21;
 
     reg running;
     reg job;
@@ -86,7 +87,14 @@ module mlkem_pmac (
     always @(posedge clk)
         last_p <= rows[2:1] - {1'b0, ~rows[0]};
     wire [6:0] total = {last_p + 2'd1, 5'd0};
-    wire v_e = (kind == `MLKEM_PJ_ENC) && (op == `MLKEM_OP_DECAPS);
+    // Re-encryption job of a Decaps request, and k - 1: registered, they
+    // change only with the job kind (the start-up hold covers the delay).
+    reg v_e;
+    reg [2:0] km1_reg;
+    always @(posedge clk) begin
+        v_e <= (kind == `MLKEM_PJ_ENC) && (op == `MLKEM_OP_DECAPS);
+        km1_reg <= k - 3'd1;
+    end
     wire to_t = (kind == `MLKEM_PJ_KG);
 
     // A group (one block of both rows of a pair, all k terms) is started only
@@ -95,58 +103,69 @@ module mlkem_pmac (
     // ready pair first, so rows finish in output order (t^ / c1 stream out
     // early); the Decaps re-encryption only compares, so ready pairs are taken
     // round robin and all INTT loads finish together.
-    // Readiness is registered for the current and the next block of every
-    // pair (fills only grow, so a one-cycle-old answer is conservative); after
-    // a pair finishes a group its "next block" answer applies.
-    reg [2:0] rdy_cur, rdy_nxt;     // combinational
-    reg [2:0] rdy_q, rdyn_q;        // registered
-    reg [2:0] inc_q;                // bp[q] advanced in the previous cycle
+    //
+    // Readiness pipeline (fills only grow, so older answers are conservative):
+    //   1. the operand fills of every pair and term are registered,
+    //   2. their compare with the pair's next block (bp) and the block after
+    //      it (bp1) is registered (rdy_q, rdyn_q),
+    //   3. the pair and block of the next group are chosen and registered
+    //      (nxt_*) in the last term of a group or while no group runs, so a
+    //      group starts from registers alone.
+    // After a pair finishes a group its "block after" answer applies for one
+    // cycle (inc_q).
 
-    // Per-job pair constants and epoch-filtered vector fills, registered.
+    // Per-job pair constants, registered. Rows of pair q are 2q and 2q + 1.
     reg [1:0] ms0_q [0:2];
     reg [1:0] ms1_q [0:2];
     reg [2:0] g1_q;
     reg [2:0] qv_q;
-    reg [5:0] fv_q [0:3];
-    integer q, jj;
-    reg [2:0] rq0, rq1;
+    integer q, jj, qr, vj;
     always @(posedge clk) begin
-        for (q = 0; q < 3; q = q + 1) begin
-            rq0 = 2 * q;
-            rq1 = 2 * q + 1;
-            ms0_q[q] <= (kind == `MLKEM_PJ_KG) ? `MLKEM_MS_A : (kind == `MLKEM_PJ_DEC) ? `MLKEM_MS_S :
-                        (rq0 == k) ? `MLKEM_MS_T : `MLKEM_MS_A;
-            ms1_q[q] <= ((kind == `MLKEM_PJ_ENC) && (rq1 == k)) ? `MLKEM_MS_T : `MLKEM_MS_A;
-            g1_q[q] <= (rq1 < rows);
-            qv_q[q] <= (q <= last_p);
+        for (qr = 0; qr < 3; qr = qr + 1) begin
+            ms0_q[qr] <= (kind == `MLKEM_PJ_KG) ? `MLKEM_MS_A : (kind == `MLKEM_PJ_DEC) ? `MLKEM_MS_S :
+                         (2 * qr == k) ? `MLKEM_MS_T : `MLKEM_MS_A;
+            ms1_q[qr] <= ((kind == `MLKEM_PJ_ENC) && (2 * qr + 1 == k)) ? `MLKEM_MS_T : `MLKEM_MS_A;
+            g1_q[qr] <= (2 * qr + 1 < rows);
+            qv_q[qr] <= (qr <= last_p);
         end
-        for (jj = 0; jj < 4; jj = jj + 1)
-            fv_q[jj] <= (v_ep[jj] == v_e) ? v_fill[jj * 6 +: 6] : 6'd0;
     end
 
+    // 1. Operand fills of pair q, term jj (index 4q + jj): even row (f0),
+    //    odd row (f1) and vector (fv). Terms beyond k and the missing odd
+    //    row read as complete (63, above every block index).
+    reg [12*6-1:0] f0_q;
+    reg [12*6-1:0] f1_q;
+    reg [5:0] fv_q [0:3];
+    always @(posedge clk) begin
+        for (qr = 0; qr < 3; qr = qr + 1) begin
+            for (vj = 0; vj < 4; vj = vj + 1) begin
+                f0_q[(4 * qr + vj) * 6 +: 6] <= (vj >= k) ? 6'd63 :
+                                     (ms0_q[qr] == `MLKEM_MS_A) ? a_fill[((8 * qr + vj) % 16) * 6 +: 6] :
+                                     (ms0_q[qr] == `MLKEM_MS_S) ? s_fill[vj * 6 +: 6] : t_fill[vj * 6 +: 6];
+                f1_q[(4 * qr + vj) * 6 +: 6] <= ((vj >= k) || !g1_q[qr]) ? 6'd63 :
+                                     (ms1_q[qr] == `MLKEM_MS_A) ? a_fill[((8 * qr + 4 + vj) % 16) * 6 +: 6] :
+                                     t_fill[vj * 6 +: 6];
+            end
+        end
+        for (vj = 0; vj < 4; vj = vj + 1)
+            fv_q[vj] <= (vj >= k) ? 6'd63 : (v_ep[vj] == v_e) ? v_fill[vj * 6 +: 6] : 6'd0;
+    end
+
+    // 2. Readiness of block bp[q] and of block bp1[q] = bp[q] + 1
+    reg [5:0] bp1 [0:2];
+    reg [2:0] rdy_cur, rdy_nxt;     // combinational
+    reg [2:0] rdy_q, rdyn_q;        // registered
+    reg [2:0] inc_q;                // bp[q] advanced in the previous cycle
     reg ok0, ok1;
-    reg [5:0] bq, f0, f1, fv;
     always @(*) begin
-        rdy_cur = 3'd0;
-        rdy_nxt = 3'd0;
-        f0 = 6'd0;
-        f1 = 6'd0;
-        fv = 6'd0;
         for (q = 0; q < 3; q = q + 1) begin
-            bq = bp[q];
             ok0 = qv_q[q];
             ok1 = qv_q[q];
             for (jj = 0; jj < 4; jj = jj + 1) begin
-                if (jj < k) begin
-                    f0 = (ms0_q[q] == `MLKEM_MS_A) ? a_fill[((8 * q + jj) % 16) * 6 +: 6] :
-                         (ms0_q[q] == `MLKEM_MS_S) ? s_fill[jj * 6 +: 6] : t_fill[jj * 6 +: 6];
-                    f1 = (ms1_q[q] == `MLKEM_MS_A) ? a_fill[((8 * q + 4 + jj) % 16) * 6 +: 6] : t_fill[jj * 6 +: 6];
-                    fv = fv_q[jj];
-                    if (!(f0 > bq) || (g1_q[q] && !(f1 > bq)) || !(fv > bq))
-                        ok0 = 1'b0;
-                    if (!(f0 > bq + 6'd1) || (g1_q[q] && !(f1 > bq + 6'd1)) || !(fv > bq + 6'd1))
-                        ok1 = 1'b0;
-                end
+                if (!(f0_q[(4 * q + jj) * 6 +: 6] > bp[q]) || !(f1_q[(4 * q + jj) * 6 +: 6] > bp[q]) || !(fv_q[jj] > bp[q]))
+                    ok0 = 1'b0;
+                if (!(f0_q[(4 * q + jj) * 6 +: 6] > bp1[q]) || !(f1_q[(4 * q + jj) * 6 +: 6] > bp1[q]) || !(fv_q[jj] > bp1[q]))
+                    ok1 = 1'b0;
             end
             rdy_cur[q] = ok0;
             rdy_nxt[q] = ok1;
@@ -158,20 +177,53 @@ module mlkem_pmac (
         rdyn_q <= rdy_nxt;
     end
 
-    wire [2:0] rdy = (inc_q & rdyn_q) | (~inc_q & rdy_q);
-
-    wire [1:0] c0 = !v_e ? 2'd0 : ((last >= last_p) ? 2'd0 : last + 2'd1);
-    wire [1:0] c1 = (c0 >= last_p) ? 2'd0 : c0 + 2'd1;
-    wire [1:0] c2 = (c1 >= last_p) ? 2'd0 : c1 + 2'd1;
-    wire any_rdy = rdy[c0] || rdy[c1] || rdy[c2];
-    wire [1:0] p_sel = rdy[c0] ? c0 : rdy[c1] ? c1 : c2;
-
-    reg [1:0] hold;                 // registered readiness settles after a (re)start (3 cycles)
-    wire issue = running && (drain == 5'd0) && (hold == 2'd0) && (in_grp || any_rdy);
+    // 3. Next group: pair nxt_p, block nxt_b (valid with nxt_v).
+    //    In the last term of a group the running pair offers its next block;
+    //    a running group that is not in its last term offers nothing.
+    reg [1:0] hold;                 // registered readiness settles after a (re)start
     reg [5:0] b_grp;                // block of the group in progress
-    wire [1:0] p = in_grp ? cur : p_sel;
-    wire [5:0] b = in_grp ? b_grp : bp[p_sel];
-    wire last_j = (j == k - 3'd1);
+    reg jlast;                      // the term in progress is the group's last (j == k - 1)
+    reg [2:0] cur_oh;               // one-hot of cur
+    reg [1:0] c0, c1, c2;           // pair order of the next start (from last)
+    reg nxt_v;
+    reg [1:0] nxt_p;
+    reg [5:0] nxt_b;
+
+    reg [2:0] avail;
+    reg [5:0] bsrc [0:2];
+    integer a;
+    always @(*) begin
+        for (a = 0; a < 3; a = a + 1) begin
+            if (in_grp)
+                avail[a] = jlast && (cur_oh[a] ? rdyn_q[a] : rdy_q[a]);
+            else
+                avail[a] = inc_q[a] ? rdyn_q[a] : rdy_q[a];
+            bsrc[a] = (in_grp && cur_oh[a]) ? b_grp + 6'd1 : bp[a];
+        end
+    end
+    wire nxt_any = avail[c0] || avail[c1] || avail[c2];
+    wire [1:0] nxt_sel = avail[c0] ? c0 : avail[c1] ? c1 : c2;
+
+    wire issue = running && (drain == 5'd0) && (hold == 2'd0) && (in_grp || nxt_v);
+    wire start = issue && !in_grp;
+    wire [1:0] p = in_grp ? cur : nxt_p;
+    wire [5:0] b = in_grp ? b_grp : nxt_b;
+    wire last_j = jlast;
+
+    // Order after a pair: the next pair round robin (Decaps re-encryption),
+    // else the lowest pair first.
+    function [5:0] order_after;
+        input [1:0] f_last;
+        input f_rr;
+        input [1:0] f_last_p;
+        reg [1:0] o0, o1, o2;
+        begin
+            o0 = !f_rr ? 2'd0 : ((f_last >= f_last_p) ? 2'd0 : f_last + 2'd1);
+            o1 = (o0 >= f_last_p) ? 2'd0 : o0 + 2'd1;
+            o2 = (o1 >= f_last_p) ? 2'd0 : o1 + 2'd1;
+            order_after = {o2, o1, o0};
+        end
+    endfunction
 
     wire [2:0] r0 = {p, 1'b0};
     wire [2:0] r1 = {p, 1'b1};
@@ -183,6 +235,16 @@ module mlkem_pmac (
 
     assign busy = running || (drain != 5'd0);
 
+    // Value of last in the next cycle; the pair order follows it.
+    wire restart = go || ((drain == 5'd1) && (op == `MLKEM_OP_DECAPS) && !job);
+    wire [1:0] last_nx = restart ? 2'd3 : start ? nxt_p : last;
+    wire [5:0] order_nx = order_after(last_nx, v_e, last_p);
+    always @(posedge clk) begin
+        c0 <= order_nx[1:0];
+        c1 <= order_nx[3:2];
+        c2 <= order_nx[5:4];
+    end
+
     integer z;
     always @(posedge clk) begin
         if (!rst_n || kill) begin
@@ -191,17 +253,25 @@ module mlkem_pmac (
             kind <= `MLKEM_PJ_KG;
             in_grp <= 1'b0;
             j <= 3'd0;
+            jlast <= 1'b0;
             groups <= 7'd0;
             last <= 2'd3;
             drain <= 5'd0;
             hold <= 2'd0;
             inc_q <= 3'd0;
-            for (z = 0; z < 3; z = z + 1)
+            nxt_v <= 1'b0;
+            for (z = 0; z < 3; z = z + 1) begin
                 bp[z] <= 6'd0;
+                bp1[z] <= 6'd1;
+            end
         end else begin
             inc_q <= 3'd0;
             if (hold != 2'd0)
                 hold <= hold - 2'd1;
+            // The next group is chosen from settled readiness only.
+            nxt_v <= running && (hold == 2'd0) && !restart && nxt_any;
+            nxt_p <= nxt_sel;
+            nxt_b <= bsrc[nxt_sel];
             if (drain != 5'd0) begin
                 drain <= drain - 5'd1;
                 if (drain == 5'd1 && op == `MLKEM_OP_DECAPS && !job) begin
@@ -211,8 +281,10 @@ module mlkem_pmac (
                     groups <= 7'd0;
                     last <= 2'd3;
                     hold <= 2'd3;
-                    for (z = 0; z < 3; z = z + 1)
+                    for (z = 0; z < 3; z = z + 1) begin
                         bp[z] <= 6'd0;
+                        bp1[z] <= 6'd1;
+                    end
                 end
             end
             if (go) begin
@@ -223,20 +295,26 @@ module mlkem_pmac (
                         (op == `MLKEM_OP_ENCAPS) ? `MLKEM_PJ_ENC : `MLKEM_PJ_DEC;
                 in_grp <= 1'b0;
                 j <= 3'd0;
+                jlast <= 1'b0;
                 groups <= 7'd0;
                 last <= 2'd3;
-                for (z = 0; z < 3; z = z + 1)
+                for (z = 0; z < 3; z = z + 1) begin
                     bp[z] <= 6'd0;
+                    bp1[z] <= 6'd1;
+                end
             end else if (issue) begin
-                if (!in_grp) begin
-                    cur <= p_sel;
-                    last <= p_sel;
-                    b_grp <= bp[p_sel];
+                if (start) begin
+                    cur <= nxt_p;
+                    cur_oh <= 3'b001 << nxt_p;
+                    last <= nxt_p;
+                    b_grp <= nxt_b;
                 end
                 if (last_j) begin
                     in_grp <= 1'b0;
                     j <= 3'd0;
+                    jlast <= 1'b0;
                     bp[cur] <= b_grp + 6'd1;
+                    bp1[cur] <= b_grp + 6'd2;
                     inc_q[cur] <= 1'b1;
                     groups <= groups + 7'd1;
                     if (groups + 7'd1 == total) begin
@@ -246,6 +324,7 @@ module mlkem_pmac (
                 end else begin
                     in_grp <= 1'b1;
                     j <= j + 3'd1;
+                    jlast <= (j + 3'd1 == km1_reg);
                 end
             end
         end
@@ -256,7 +335,8 @@ module mlkem_pmac (
     reg [4:0] blk1;
     reg [1:0] p1;
     reg [1:0] j1;
-    reg [1:0] ms0_1, ms1_1;
+    reg [1:0] ms0_1;
+    reg [1:0] ms1_1;
     always @(posedge clk) begin
         if (!rst_n || kill)
             v1 <= 1'b0;
@@ -285,24 +365,49 @@ module mlkem_pmac (
     wire [47:0] g_blk;
     mlkem_gamma_rom u_gamma (.blk(blk1), .g(g_blk));
 
+    // Stage R: blocks as read (slot and lane selects are in front of the
+    // ports), registered, so the store read paths end next to the stores.
+    reg vr, g1_r, last_r;
+    reg [1:0] ms0_r, ms1_r;
+    reg [6:0] meta_r;
+    reg [95:0] ae_r, ao_r, s_r, t_r, v_r;
+    reg [47:0] g_r;
+    always @(posedge clk) begin
+        if (!rst_n || kill)
+            vr <= 1'b0;
+        else
+            vr <= v1;
+        g1_r <= g1_1;
+        last_r <= last1;
+        ms0_r <= ms0_1;
+        ms1_r <= ms1_1;
+        meta_r <= {p1, blk1};
+        ae_r <= ae_rdata;
+        ao_r <= ao_rdata;
+        s_r <= s_rdata;
+        t_r <= t_rdata;
+        v_r <= v_rdata;
+        g_r <= g_blk;
+    end
+
     // Stage 2: operands
     reg v2, g1_2, last2;
     reg [95:0] m0_2, m1_2;
     reg [95:0] y2;
     reg [47:0] g2;
-    reg [7:0] meta2;
+    reg [6:0] meta2;                // {pair, block} of the term
     always @(posedge clk) begin
         if (!rst_n || kill)
             v2 <= 1'b0;
         else
-            v2 <= v1;
-        g1_2 <= g1_1;
-        last2 <= last1;
-        m0_2 <= (ms0_1 == `MLKEM_MS_A) ? ae_rdata : (ms0_1 == `MLKEM_MS_S) ? s_rdata : t_rdata;
-        m1_2 <= (ms1_1 == `MLKEM_MS_A) ? ao_rdata : t_rdata;
-        y2 <= v_rdata;
-        g2 <= g_blk;
-        meta2 <= {g1_1, p1, blk1};
+            v2 <= vr;
+        g1_2 <= g1_r;
+        last2 <= last_r;
+        m0_2 <= (ms0_r == `MLKEM_MS_A) ? ae_r : (ms0_r == `MLKEM_MS_S) ? s_r : t_r;
+        m1_2 <= (ms1_r == `MLKEM_MS_A) ? ao_r : t_r;
+        y2 <= v_r;
+        g2 <= g_r;
+        meta2 <= meta_r;
     end
 
     // The lanes start every request with empty accumulators.
@@ -343,32 +448,38 @@ module mlkem_pmac (
         end
     endgenerate
 
-    wire [7:0] meta_o;
-    mlkem_delay #(.W(8), .D(LANE_LAT)) u_meta (.clk(clk), .d(meta2), .q(meta_o));
+    wire [6:0] meta_o;
+    mlkem_delay #(.W(7), .D(LANE_LAT)) u_meta (.clk(clk), .d(meta2), .q(meta_o));
 
     wire [2:0] or0 = {meta_o[6:5], 1'b0};
     wire [2:0] or1 = {meta_o[6:5], 1'b1};
 
-    // ENC row r < k feeds row lane 4 + r; the t^.y^ row and DEC feed lane 8.
-    wire [3:0] dest0 = ((kind == `MLKEM_PJ_ENC) && (or0 != k)) ? {1'b0, or0} + 4'd4 : 4'd8;
-    wire [3:0] dest1 = ((kind == `MLKEM_PJ_ENC) && (or1 != k)) ? {1'b0, or1} + 4'd4 : 4'd8;
+    // ENC row r < k feeds row lane 4 + r; the t^.y^ row (r = k) and DEC feed
+    // lane 8. The two ports never address lane 8 in the same cycle.
+    wire row0_v = lane_v[0] && !to_t;
+    wire row1_v = lane_v[4] && !to_t;
+    wire to8_0 = !((kind == `MLKEM_PJ_ENC) && (or0 != k));
+    wire to8_1 = !((kind == `MLKEM_PJ_ENC) && (or1 != k));
 
     always @(posedge clk) begin
         if (!rst_n || kill) begin
-            wr0_en <= 1'b0;
-            wr1_en <= 1'b0;
+            wr_t_en <= 4'd0;
+            wr_lane_en <= 5'd0;
         end else begin
-            wr0_en <= lane_v[0];
-            wr1_en <= lane_v[4];
+            wr_t_en[0] <= lane_v[0] && to_t && (or0 == 3'd0);
+            wr_t_en[1] <= lane_v[4] && to_t && (or1 == 3'd1);
+            wr_t_en[2] <= lane_v[0] && to_t && (or0 == 3'd2);
+            wr_t_en[3] <= lane_v[4] && to_t && (or1 == 3'd3);
+            wr_lane_en[4] <= row0_v && !to8_0 && (or0 == 3'd0);
+            wr_lane_en[5] <= row1_v && !to8_1 && (or1 == 3'd1);
+            wr_lane_en[6] <= row0_v && !to8_0 && (or0 == 3'd2);
+            wr_lane_en[7] <= row1_v && !to8_1 && (or1 == 3'd3);
+            wr_lane_en[8] <= (row0_v && to8_0) || (row1_v && to8_1);
         end
-        wr_t <= to_t;
-        wr0_row <= or0;
-        wr1_row <= or1;
-        wr0_lane <= dest0;
-        wr1_lane <= dest1;
+        wr8_p1 <= row1_v && to8_1;
+        wr8_ep <= (kind == `MLKEM_PJ_ENC) && v_e;
         wr_blk <= meta_o[4:0];
-        wr0_ep <= (kind == `MLKEM_PJ_ENC) && (or0 == k) && v_e;
-        wr1_ep <= (kind == `MLKEM_PJ_ENC) && (or1 == k) && v_e;
+        wr_first <= (meta_o[4:0] == 5'd0);
         wr0_data <= res0;
         wr1_data <= res1;
     end

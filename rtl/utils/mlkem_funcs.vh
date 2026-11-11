@@ -27,13 +27,17 @@ function [3:0] mlkem_dv;
     end
 endfunction
 
+// (a + b) mod q for canonical a, b: the sum and the sum minus q are formed
+// side by side, the sign of the second selects.
 function [11:0] mlkem_mod_add;
     input [11:0] a;
     input [11:0] b;
     reg [12:0] s;
+    reg [13:0] d;
     begin
-        s = a + b;
-        mlkem_mod_add = (s >= 13'd3329) ? s - 13'd3329 : s[11:0];
+        s = {1'b0, a} + {1'b0, b};
+        d = {2'b00, a} + {2'b00, b} - 14'd3329;
+        mlkem_mod_add = d[13] ? s[11:0] : d[11:0];
     end
 endfunction
 
@@ -45,26 +49,16 @@ function [11:0] mlkem_mod_sub;
     end
 endfunction
 
-// Decompress_d(y) = round(q * y / 2^d) for the two d values of u (10, 11):
-// a 2-way select, no variable shift
-function [11:0] mlkem_decompress_u;
+// Decompress_d(y) = round(q * y / 2^d) = (q * y + 2^(d-1)) >> d, split over
+// two pipeline stages: the caller registers 3 * y and y + 2^(d-1) next to y,
+// and this sum q * y + 2^(d-1) = (3y << 10) + (y << 8) + (y + 2^(d-1)) is
+// then shifted by d (a 2-way select per parameter set, no variable shift).
+function [22:0] mlkem_decompress_sum;
+    input [12:0] y3;
     input [10:0] y;
-    input d11;
-    reg [22:0] t;
+    input [11:0] yr;
     begin
-        t = ({12'd0, y} << 11) + ({12'd0, y} << 10) + ({12'd0, y} << 8) + {12'd0, y};
-        mlkem_decompress_u = d11 ? ((t + 23'd1024) >> 11) : ((t + 23'd512) >> 10);
-    end
-endfunction
-
-// Decompress_d for the two d values of v (4, 5)
-function [11:0] mlkem_decompress_v;
-    input [10:0] y;
-    input d5;
-    reg [22:0] t;
-    begin
-        t = ({12'd0, y} << 11) + ({12'd0, y} << 10) + ({12'd0, y} << 8) + {12'd0, y};
-        mlkem_decompress_v = d5 ? ((t + 23'd16) >> 5) : ((t + 23'd8) >> 4);
+        mlkem_decompress_sum = {y3, 10'd0} + {4'd0, y, 8'd0} + {11'd0, yr};
     end
 endfunction
 
