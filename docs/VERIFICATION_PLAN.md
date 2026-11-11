@@ -218,9 +218,9 @@ The first regression follows the "initial route without UVM" of SPEC section 5.
 | Item | Status | Reproduce |
 |---|---|---|
 | Golden model | `vector/mlkem_gen.py`, written from FIPS 203; cross-checked against the independent `kyber-py` package for all parameter sets (KeyGen, Encaps, Decaps, implicit rejection). Confirms the NTT IP scaling and the Compress/Montgomery constants exhaustively. | `python3 Implementation/vector/mlkem_gen.py N` |
-| Core regression | `tb_mlkem_core`: 3 operations × 3 sets, implicit rejection, invalid `ek`, wrong `H(ek)` in `dk`, early `TLAST`, ABORT, invalid configuration, recovery; random backpressure on both streams; all words, `TKEEP` and `TLAST` compared. | `make test STALL=<pct> SEED=<n> N=<keys per set>` |
-| IP top | `tb_mlkem_axi`: requests through the register map and streams, SLVERR rules, error codes 1/2/4/6, ACK lifecycle, READY low during the post-reset clear. | `make test-axi` |
-| Performance | Cycle counts per request with always-ready streams; engine timelines. | `make perf`, `make trace` |
+| Core regression | `tb_mlkem_core`: 3 operations × 3 sets, implicit rejection, invalid `ek`, wrong `H(ek)` in `dk`, ABORT, invalid configuration, recovery; random backpressure on the request and result ports; all result words and their count compared. | `make test STALL=<pct> SEED=<n> N=<keys per set>` |
+| IP top | `tb_mlkem_axi`: requests through the register map and the AXI4 buffer (INCR bursts of odd lengths split at 4 KB, one request in 32-bit narrow beats, random VALID/READY stalls), result comparison, buffer wipe after ACK, before ERROR and after reset; register SLVERR rules, VERSION, IRQ_ENABLE, error codes 1/3/4/6; buffer FIXED/WRAP bursts, byte strobes, narrow reads, beats past the end, AxSIZE above the bus width, access while busy (SLVERR, zero data), simultaneous AW and AR. | `make test-axi STALL=<pct> SEED=<n>` |
+| Performance | Cycle counts per request with always-ready request and result ports (core), START to DONE (IP top); engine timelines. | `make perf`, `make test-axi`, `make trace` |
 | Lint | Verilator `-Wall` clean for the new RTL (three warning classes are disabled because they occur only inside the reused NTT/Keccak IPs). | `make lint` |
 
 Not yet covered: UVM environment, assertions/formal properties, functional and

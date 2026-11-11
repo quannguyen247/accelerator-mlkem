@@ -2,35 +2,44 @@
 
 This repository contains synthesizable Verilog RTL for a complete FIPS 203
 ML-KEM accelerator: KeyGen, Encaps and Decaps for ML-KEM-512, -768 and -1024
-with the public byte-string interface (`ek`, `dk`, `c`, `K`). An AXI4-Lite
-register slave and two 64-bit AXI4-Stream ports connect the core to a host CPU
-and an AXI DMA. The design uses LUTs, flip-flops and distributed RAM only:
-0 BRAM, 0 URAM, 0 DSP.
+with the public byte-string interface (`ek`, `dk`, `c`, `K`). Two
+memory-mapped slaves connect it to a host CPU and, through the interconnect,
+to a memory-to-memory DMA such as AXI CDMA: an AXI4-Lite register slave and a
+64-bit AXI4 slave on a 4,736-byte request/result buffer. The design uses
+LUTs, flip-flops and distributed RAM only: 0 BRAM, 0 URAM, 0 DSP.
 
-The accelerator contains the two finished cores of this project. Their sources
-are copied unchanged from the `ntt-mlkem` and `keccak-mlkem` repositories:
+The accelerator contains the two finished cores of this project, taken from
+the `ntt-mlkem` and `keccak-mlkem` repositories. Their interfaces and results
+are unchanged; the copies here carry the timing changes listed in the
+[implementation results](docs/RESULT.md) (pipeline stages in the NTT
+butterfly and RAM ports, lane-enabled absorb in the Keccak sponge):
 
 | Core | Folder | Use |
 | --- | --- | --- |
 | `ntt_core_top` | [`rtl/modules/poly/ntt/`](rtl/modules/poly/ntt/) | nine instances (NTT/INTT lanes), `INTT_SCALE = 0` |
-| `keccak_top` | [`rtl/modules/hash/keccak/`](rtl/modules/hash/keccak/) | one instance (G, H, J, PRF, XOF) |
+| `keccak_sponge` | [`rtl/modules/hash/keccak/`](rtl/modules/hash/keccak/) | one instance (G, H, J, PRF, XOF); the hash engine pads the blocks |
 
 ## Key results
 
-The standalone run of `mlkem_axi` (the IP top, including the AXI wrapper) uses
-AMD Vivado 2025.2.1 on K26 `xck26-sfvc784-2LV-c` (KV260), out of context, at
-250 MHz (4 ns clock period), with default synthesis and implementation
-strategies:
+The standalone run of `mlkem_axi` (the IP top, including both AXI slaves and
+the I/O buffer) uses
+AMD Vivado 2025.2.1 on Artix-7 XC7A200T-3 (`xc7a200tfbg676-3`), the device of
+the comparison paper, out of context, at 227 MHz (4.4 ns clock period), with
+default synthesis and implementation strategies:
 
-- Resources: 40,323 LUTs (4,762 as distributed RAM, 825 as shift registers),
-  25,091 flip-flops, 0 BRAM, 0 URAM, 0 DSP.
-- Timing: WNS = +0.276 ns, WHS = +0.036 ns, no failing endpoints. The
-  estimated Fmax from WNS is 1000 / (4.000 - 0.276), about 268 MHz.
-- Latency (cycles from `start` to `done`, KeyGen / Encaps / Decaps):
-  1,900 / 3,023 / 5,707 for ML-KEM-512, 2,014 / 3,142 / 5,849 for ML-KEM-768
-  and 2,198 / 3,365 / 6,157 for ML-KEM-1024; at 250 MHz that is 7.6 / 12.1 /
-  22.8 µs and 8.8 / 13.5 / 24.6 µs for the smallest and largest set.
-- Power: 1.51 W vectorless estimate (not a measurement).
+- Resources: 40,304 LUTs (6,574 as distributed RAM, 809 as shift registers),
+  29,330 flip-flops, 12,010 slices, 0 BRAM, 0 DSP.
+- Timing: WNS = +0.135 ns, WHS = +0.054 ns, no failing endpoints; estimated
+  Fmax about 234 MHz. No synthesis warning.
+- Latency (cycles from the START register write to DONE, KeyGen / Encaps /
+  Decaps): 1,907 / 3,039 / 5,731 for ML-KEM-512, 2,021 / 3,158 / 5,873 for
+  ML-KEM-768 and 2,215 / 3,376 / 6,181 for ML-KEM-1024; at 227 MHz that is
+  8.4 / 13.4 / 25.2 µs and 9.7 / 14.9 / 27.2 µs for the smallest and largest
+  set. The host copies into and out of the buffer come on top.
+- Against Ni et al., ACM TECS 2025 (ML-KEM, same device, 263 – 270 MHz):
+  ML-KEM-1024 KeyGen + Encaps + Decaps 51.8 µs against 70.8 µs; ML-KEM-512
+  47.0 µs against 30.2 µs; 3.5 – 4.0× the LUTs, no DSP.
+- Power: 2.07 W vectorless estimate (not a measurement).
 
 Details are in the [implementation results](docs/RESULT.md).
 
@@ -39,12 +48,13 @@ Details are in the [implementation results](docs/RESULT.md).
 ```text
  AXI4-Lite ◄─► Slave CSR ◄── start / done ──► ML-KEM Controller (IDLE → RUN → WAIT → DONE)
                CONTROL STATUS ERRCODE                        │
-               CONFIG LEN CAP SEED                           ▼
+               CONFIG IRQ_ENABLE VERSION SEED                ▼
+ AXI4 ◄──────► I/O buffer, 592 × 64-bit LUTRAM: request words ──► Input, Output ──► result words
  ┌─ ML-KEM Datapath ──────────────────────────────────────────────────────────────────┐
  │                       ┌──────────── noise (PRF) ───────────┐                        │
  │                       │                                    ▼                        │
- │  Stream In ──► Keccak (hash) ──► Sampler ──► Polynomial Arithmetic Unit ──► Stream Out
- │  AXIS slave    G H J PRF XOF     SampleNTT   Poly MAC ◄─► NTT lanes ×9      AXIS master
+ │  Input ──────► Keccak (hash) ──► Sampler ──► Polynomial Arithmetic Unit ──► Output
+ │  from buffer   G H J PRF XOF     SampleNTT   Poly MAC ◄─► NTT lanes ×9      to buffer
  │  ByteDecode                      Â store     BaseMul ×8   load / NTT /      ByteEncode
  │      │              ▲                │                    unload            add ê
  │      ▼              │                ▼                       ▲                 ▲
@@ -56,12 +66,12 @@ Each block of the diagram is one folder of [`rtl/modules/`](rtl/modules/):
 
 | Block | Folder | Modules |
 | --- | --- | --- |
-| Slave CSR, ML-KEM Controller | [`top/`](rtl/modules/top/) | `mlkem_axi.v` (AXI4-Lite CSR, streams, interrupt: the IP top), `mlkem_core.v` (controller, stores and datapath wiring: the native core) |
-| Stream In, Stream Out | [`stream/`](rtl/modules/stream/) | `mlkem_in.v`, `mlkem_unpack.v` (ByteDecode), `mlkem_out.v`, `mlkem_pack.v` (ByteEncode), `mlkem_axis_slice.v` (register slice) |
-| Keccak | [`hash/`](rtl/modules/hash/) | `mlkem_hash.v` (job list on one `keccak_top`), `mlkem_rej_count.v` (accepted-candidate precount of an XOF block). Keccak core: `keccak/` (`keccak_top.v`, `keccak_sponge.v`, `keccak_permutation.v`, `keccak_pad_block.v`) |
+| Slave CSR, ML-KEM Controller | [`top/`](rtl/modules/top/) | `mlkem_axi.v` (AXI4-Lite CSR, interrupt, buffer: the IP top), `mlkem_core.v` (controller, stores and datapath wiring: the native core) |
+| Input, Output | [`stream/`](rtl/modules/stream/) | `mlkem_in.v`, `mlkem_unpack.v` (ByteDecode), `mlkem_out.v`, `mlkem_pack.v` (ByteEncode), `mlkem_axis_slice.v` (register slice) |
+| Keccak | [`hash/`](rtl/modules/hash/) | `mlkem_hash.v` (job list on one `keccak_sponge`), `mlkem_rej_count.v` (accepted-candidate precount of an XOF block). Keccak core: `keccak/` (`keccak_top.v`, `keccak_sponge.v`, `keccak_permutation.v`, `keccak_pad_block.v`) |
 | Sampler | [`sampler/`](rtl/modules/sampler/) | `mlkem_sampler.v` (SampleNTT, 8 candidates per cycle, matrix store) |
 | Polynomial Arithmetic Unit | [`poly/`](rtl/modules/poly/) | Poly MAC: `mlkem_pmac.v`, `mlkem_basemul_lane.v`, `mlkem_gamma_rom.v`. NTT lanes: `mlkem_lane.v` (load, `ntt_core_top`, unload), `mlkem_cbd_stream.v`, `mlkem_compress.v`. Shared arithmetic: `mlkem_mul.v`, `mlkem_montred.v`, `mlkem_delay.v`. NTT core: `ntt/` (`ntt_core_top.v` and its controller, AGU, butterfly, multiplier, RAM, twiddle ROM) |
-| Local Storage | [`storage/`](rtl/modules/storage/) | `mlkem_fifo.v` (tap FIFO), `mlkem_poly_ram.v` (polynomial memories), `mlkem_slot_state.v` (fill counter and epoch of a slot) |
+| I/O buffer, Local Storage | [`storage/`](rtl/modules/storage/) | `mlkem_iobuf.v` (request/result buffer with its AXI4 slave, reader, writer and wipe), `mlkem_buf_ram.v` (its byte-write LUTRAM), `mlkem_rdq.v` (read queue); `mlkem_fifo.v` (tap FIFO), `mlkem_poly_ram.v` (polynomial memories), `mlkem_slot_state.v` (fill counter and epoch of a slot) |
 
 Shared headers are in [`rtl/utils/`](rtl/utils/): `mlkem_defs.vh`,
 `mlkem_funcs.vh`, `ntt_defs.vh`, `ntt_funcs.vh`, `keccak_defs.vh` and
@@ -74,8 +84,8 @@ Shared headers are in [`rtl/utils/`](rtl/utils/): `mlkem_defs.vh`,
 | [`rtl/`](rtl/) | Accelerator RTL (`modules/<block>/`) and shared headers (`utils/`) |
 | [`testbench/`](testbench/) | Self-checking testbenches: `tb_mlkem_core.sv` (native core), `tb_mlkem_axi.sv` (IP top), `tb_mlkem_trace.sv` (timeline monitor) |
 | [`vector/`](vector/) | `mlkem_gen.py`, the FIPS 203 golden model, and the default vector set `tv_*.mem` |
-| [`constraint/`](constraint/) | 4 ns clock constraint for the standalone build |
-| [`project/mlkem_top/`](project/mlkem_top/) | Vivado project (K26, out of context) for standalone `mlkem_axi` |
+| [`constraint/`](constraint/) | 4.4 ns clock (`mlkem.xdc`) and, for 7-series parts, the out-of-context clock source and partition-pin region (`mlkem_ooc.xdc`) |
+| [`project/mlkem_top/`](project/mlkem_top/) | Vivado project (Artix-7 XC7A200T-3, out of context) for standalone `mlkem_axi` |
 | [`project/ip_repo/mlkem_core/`](project/ip_repo/mlkem_core/) | Packaged IP `quannguyen247.org:user:mlkem_core:1.0`: the accelerator (`mlkem_axi`), copy of all RTL |
 | [`project/ip_repo/ntt_core/`](project/ip_repo/ntt_core/) | Packaged IP `quannguyen247.org:user:ntt_core:1.0`: the NTT/INTT core (`ntt_core_top`, parameter `INTT_SCALE`) |
 | [`project/ip_repo/keccak_core/`](project/ip_repo/keccak_core/) | Packaged IP `quannguyen247.org:user:keccak_core:1.0`: the AXI4-Stream Keccak core of `keccak-mlkem`, unchanged |
@@ -107,11 +117,11 @@ make sim-iverilog
 
 | Target | Content |
 | --- | --- |
-| `make sim-iverilog` | core regression on Icarus Verilog with random stalls on both streams (`STALL=30`, `SEED=1`, `N=1`) |
+| `make sim-iverilog` | core regression on Icarus Verilog with random stalls on the request and result ports (`STALL=30`, `SEED=1`, `N=1`) |
 | `make test` | the same regression on QuestaSim (`vlog`/`vsim`) |
-| `make perf` | always-ready streams, prints cycles per request |
-| `make trace` | per-request engine timeline (Keccak jobs, NTT lanes, PMAC, streams) |
-| `make test-axi` | AXI4-Lite register slave and DMA-style streams (SPEC section 4), error and lifecycle cases |
+| `make perf` | always-ready request and result ports, prints cycles per request |
+| `make trace` | per-request engine timeline (Keccak jobs, NTT lanes, PMAC, input/output); out of date: the monitor still refers to FSM signals the RTL no longer has |
+| `make test-axi` | IP top (SPEC section 4): register map and AXI4 buffer (INCR/FIXED/WRAP bursts, narrow beats, byte strobes, random VALID/READY stalls, `STALL`/`SEED`), error and lifecycle cases |
 | `make lint` | Verilator lint of the RTL |
 | `make project` | recreates `project/mlkem_top/mlkem_top.xpr` |
 | `make package` | repackages `project/ip_repo/mlkem_core` and `project/ip_repo/ntt_core` |
@@ -131,28 +141,34 @@ and DSP to zero. To use the IPs in a block design, add
 
 | Signal | Dir | Meaning |
 | --- | --- | --- |
-| `start`, `op[1:0]`, `pset[1:0]`, `seed[511:0]` | in | one-cycle start while `ready`; op 0 KeyGen, 1 Encaps, 2 Decaps; set 0/1/2 = 512/768/1024; `seed[255:0]` = d (KeyGen) or m (Encaps), `seed[511:256]` = z |
+| `start`, `op[1:0]`, `pset[1:0]` | in | one-cycle start while `ready`; op 0 KeyGen, 1 Encaps, 2 Decaps; set 0/1/2 = 512/768/1024 |
+| `seed_we[15:0]`, `seed_wdata[31:0]`, `seed_clr` | in | seed word writes while `ready`: words 0..7 = d (KeyGen) or m (Encaps), 8..15 = z; cleared at the end of every request and by `seed_clr` |
 | `abort` | in | stop the request, clear secrets, report error 6 |
-| `ready`, `done`, `error`, `err_code[2:0]` | out | `done`/`error` pulse at the end; codes: 1 config, 2 framing, 3 invalid key (Encaps ek modulus check or Decaps H(ek) check), 6 abort |
-| `s_axis_*` (64-bit) | in | request packet: Encaps `ek`, Decaps `dk || c` |
-| `m_axis_*` (64-bit) | out | result packet: KeyGen `ek || dk`, Encaps `c || K`, Decaps `K` |
+| `ready`, `done`, `error`, `err_code[2:0]` | out | `done`/`error` pulse at the end; codes: 1 config, 3 invalid key (Encaps ek modulus check or Decaps H(ek) check), 6 abort |
+| `in_data[63:0]`, `in_valid`, `in_ready` | in | request words: Encaps `ek`, Decaps `dk || c` |
+| `out_data[63:0]`, `out_valid`, `out_ready` | out | result words: KeyGen `ek || dk`, Encaps `c || K`, Decaps `K` |
 
-Byte 0 of a packet is `TDATA[7:0]`. All packets are whole 64-bit words, so
-`TKEEP` is always `0xFF`; `TLAST` marks the last word. The input port accepts
-exactly the words of the active request. A failed Decaps re-encryption check is
-not an error: the core returns the implicit-rejection key `J(z || c)` with the
-same timing as a successful decapsulation.
+Byte 0 of an object is bits `[7:0]` of its first word; every object is a whole
+number of 64-bit words. The input port accepts exactly the words of the active
+request and the output port emits exactly the words of its result. A failed
+Decaps re-encryption check is not an error: the core returns the
+implicit-rejection key `J(z || c)` with the same timing as a successful
+decapsulation.
 
 `mlkem_axi` wraps the core with the SPEC section 4 register map (CONTROL,
-STATUS, CONFIG, IN0/IN1_LEN, OUT0/OUT1_CAP, ERRCODE, SEED window) and `irq`.
+STATUS, ERRCODE, CONFIG, IRQ_ENABLE, VERSION, SEED window), `irq`, and the
+request/result buffer `mlkem_iobuf`: the host writes the request into the
+buffer over AXI4 while READY, the core reads it from offset 0 and writes the
+result over it from offset 0, and the host reads the result after DONE. ACK
+wipes the buffer; a failed request wipes it before ERROR.
 
 ## Microarchitecture
 
 ```text
- s_axis ─► mlkem_in ──► S / T / C stores, rho h z ──────────────┐
+ buffer ─► mlkem_in ──► S / T / C stores, rho h z ──────────────┐
              │ tap (ek, c)                                       │
              ▼                                                   ▼
-          FIFO ─► mlkem_hash (keccak_top) ─► sampler ─► A store (k² polys)
+          FIFO ─► mlkem_hash (keccak_sponge) ─► sampler ─► A store (k² polys)
                      │ PRF words                                 │
                      ▼                                           ▼
    lanes 0..3  NTT  (s, y, u')   ── buffers B0..3 ──► mlkem_pmac (8 basemul lanes)
@@ -160,7 +176,7 @@ STATUS, CONFIG, IN0/IN1_LEN, OUT0/OUT1_CAP, ERRCODE, SEED window) and `irq`.
    lane  8     INTT (v, w)                      ◄── B8   ◄──────┘
         │ compress / compare / m'                    │ t^ (KeyGen)
         ▼                                            ▼
-       C store ─────────────────────────► mlkem_out ─► m_axis
+       C store ─────────────────────────► mlkem_out ─► buffer
 ```
 
 * **Dataflow control.** Each engine (input, hash, nine lanes, PMAC, output)
@@ -179,7 +195,7 @@ STATUS, CONFIG, IN0/IN1_LEN, OUT0/OUT1_CAP, ERRCODE, SEED window) and `irq`.
   exist; ready row pairs are taken lowest first (KeyGen, Encaps: output order)
   or round robin (Decaps re-encryption: balanced INTT loads).
 * **Hash engine.** One job list per operation; long messages come from a tap
-  FIFO filled by the stream engines, so the streams never wait for Keccak.
+  FIFO filled by the input and output engines, so they never wait for Keccak.
   PRF output goes straight into the lane noise memories; consumers start on the
   first written word. The block that completes a matrix polynomial is found by
   a precount before its handshake, so no permutation is wasted. A final WIPE job
@@ -195,14 +211,17 @@ STATUS, CONFIG, IN0/IN1_LEN, OUT0/OUT1_CAP, ERRCODE, SEED window) and `irq`.
 
 ## Performance
 
-Cycles from `start` to `done`, always-ready streams, 64-bit streams, including
-the secret clearing at the end (`make perf`):
+Cycles from `start` to `done` of `mlkem_core` with always-ready 64-bit request
+and result ports, including the secret clearing at the end (`make perf`). The
+IP top reads the request from its buffer and stores the result at the same one
+word per cycle, so from the START register write to DONE it takes two more
+cycles (`make test-axi` prints them):
 
 | Parameter set | KeyGen | Encaps | Decaps |
 | --- | ---: | ---: | ---: |
-| ML-KEM-512 | 1,900 | 3,023 | 5,707 |
-| ML-KEM-768 | 2,014 | 3,142 | 5,849 |
-| ML-KEM-1024 | 2,198 | 3,365 | 6,157 |
+| ML-KEM-512 | 1,905 | 3,037 | 5,729 |
+| ML-KEM-768 | 2,019 | 3,156 | 5,871 |
+| ML-KEM-1024 | 2,213 | 3,374 | 6,179 |
 
 ### Bottleneck analysis
 
@@ -247,12 +266,18 @@ data dependencies:
   Montgomery constants exhaustively.
 * `tb_mlkem_core`: every operation × parameter set, a tampered ciphertext
   (implicit rejection), an `ek` with a coefficient ≥ q, a `dk` with a wrong
-  `H(ek)`, early `TLAST`, ABORT during Encaps, an invalid configuration, and
-  recovery after the error cases; random backpressure on both streams.
-* `tb_mlkem_axi`: the same requests through the register map and streams, plus
-  SLVERR cases (read of WO, write of RO, unmapped offset, two command bits,
-  reserved CONFIG bits, misaligned access, partial strobes, ACK without outcome, START,
-  CONFIG or SEED while busy), length/seed/config errors and ABORT.
+  `H(ek)`, ABORT during Encaps, an invalid configuration, and recovery after
+  the error cases; random backpressure on the request and result ports.
+* `tb_mlkem_axi`: the same requests through the register map and the AXI4
+  buffer (INCR bursts of odd lengths split at 4 KB, one request in 32-bit
+  narrow beats, random VALID/READY stalls), result comparison, buffer wipe
+  after ACK and before ERROR; register SLVERR cases (read of WO, write of RO,
+  unmapped offset, two command bits, reserved CONFIG / IRQ_ENABLE bits,
+  misaligned access, partial strobes, ACK without outcome, START, CONFIG or
+  SEED while busy), VERSION, IRQ_ENABLE masking; buffer cases (FIXED and WRAP
+  bursts, byte strobes, narrow reads, beats past the end, AxSIZE above the bus
+  width, access while busy with zero read data, simultaneous AW and AR); seed,
+  configuration and ABORT errors.
 * The testbench detects corrupted expected words (checked by mutation).
 
 ## Documentation
@@ -268,7 +293,8 @@ data dependencies:
 
 No masking, hiding or fault countermeasures; no FIPS validation. The SoC
 items of SPEC sections 4–6 (DMA, firmware, board test, RBG provider) are not
-part of this repository yet.
+part of this repository yet. The AXI4 slave serves one burst at a time and has
+no exclusive-access monitor.
 
 ## References
 

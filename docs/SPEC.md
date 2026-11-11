@@ -1,6 +1,6 @@
 # ML-KEM SoC Technical Specification
 
-**Status:** Draft. ML-KEM IP RTL (native core and AXI4-Lite/AXI4-Stream top) implemented and verified in simulation; SoC integration (DMA, firmware, board test) pending
+**Status:** Draft. ML-KEM IP RTL (native core and AXI4-Lite/AXI4 top) implemented and verified in simulation; SoC integration (DMA, firmware, board test) pending
 
 **Target product:** CPU-controlled ML-KEM SoC with on-chip IMEM/DMEM SRAM; Kria K26 / KV260 as a prototype platform
 
@@ -16,9 +16,9 @@ The words **shall** and **shall not** state requirements. **TBD** identifies a c
 
 ### 1.1 Scope
 
-The SoC contains one transaction controller, the compute functions listed in Section 3, temporary object storage, an AXI4-Lite host interface, a DMA engine with AXI4-Stream input/output, and a trusted source of random bytes. The first integration uses one active KEM request at a time. No particular RTL module name, port suffix convention, memory bank count, or pipeline depth is prescribed here. Section 4 fixes the first SoC's host-visible register offsets. The ML-KEM IP, including local memories and interface logic, targets LUT/FF/LUTRAM with 0 BRAM, 0 URAM, and 0 DSP; CPU, system SRAM, interconnect, RBG, and DMA resources are reported separately.
+The SoC contains one transaction controller, the compute functions listed in Section 3, temporary object storage, an AXI4-Lite register interface, an AXI4 slave on the IP's request/result buffer (filled and drained by the CPU or a memory-to-memory DMA), and a trusted source of random bytes. The first integration uses one active KEM request at a time. No particular RTL module name, port suffix convention, memory bank count, or pipeline depth is prescribed here. Section 4 fixes the first SoC's host-visible register offsets. The ML-KEM IP, including local memories and interface logic, targets LUT/FF/LUTRAM with 0 BRAM, 0 URAM, and 0 DSP; CPU, system SRAM, interconnect, RBG, and DMA resources are reported separately.
 
-This revision does not claim masking, power/EM side-channel resistance, fault-attack resistance, FIPS validation, ASIC signoff, or measured SoC performance. Those claims require separate designs and evidence. The IP contains unchanged copies of `ntt_core_top` from `ntt-mlkem` ([`rtl/modules/poly/ntt/`](../rtl/modules/poly/ntt/), used with `INTT_SCALE = 0`) and `keccak_top` from `keccak-mlkem` ([`rtl/modules/hash/keccak/`](../rtl/modules/hash/keccak/)); sampling, CBD, base multiplication, codecs, storage and control are implemented in this repository (Section 3.3).
+This revision does not claim masking, power/EM side-channel resistance, fault-attack resistance, FIPS validation, ASIC signoff, or measured SoC performance. Those claims require separate designs and evidence. The IP contains copies of `ntt_core_top` from `ntt-mlkem` ([`rtl/modules/poly/ntt/`](../rtl/modules/poly/ntt/), used with `INTT_SCALE = 0`) and of the Keccak sponge from `keccak-mlkem` ([`rtl/modules/hash/keccak/`](../rtl/modules/hash/keccak/)), with the timing changes listed in [RESULT.md](RESULT.md) and unchanged function; sampling, CBD, base multiplication, codecs, storage and control are implemented in this repository (Section 3.3).
 
 ## 2. Functions and externally visible data
 
@@ -68,9 +68,9 @@ Here `H = SHA3-256`, `G = SHA3-512`, `J` and `PRF` use SHAKE256, and the matrix 
 CPU-controlled ML-KEM SoC (K26 / KV260 prototype)
 ┌──────────────────────────────────────────────────────────────┐
 │ Host CPU + driver; IMEM/DMEM SRAM; RBG → fresh d,z,m         │
-│             │ AXI4-Lite CSR; DMA ↔ IP via AXI4-Stream        │
+│             │ AXI4-Lite CSR; CPU/CDMA ↔ IP buffer via AXI4   │
 │             ▼                                                │
-│ AXI4-Lite + stream adapters ── controller ── object store    │
+│ AXI4-Lite + AXI4 buffer ── controller ── object store        │
 │                          │                 (scratch + bytes) │
 │                          ▼                                   │
 │                sequencer → dispatcher                        │
@@ -83,24 +83,24 @@ CPU-controlled ML-KEM SoC (K26 / KV260 prototype)
 
 The driver owns request submission and the host-visible buffers. The transaction controller owns acceptance, input checks, status, output commit, and recovery. The sequencer owns FIPS 203 operation order and parameter-dependent iteration; the dispatcher executes one command and reports its completion or error. The object store maps logical polynomial and byte objects to physical storage. Compute blocks only perform their declared transforms. The final SoC shall not require application software to execute hidden KEM steps between hardware commands.
 
-The CPU and DMA memory port are AXI4 masters; IMEM, DMEM, DMA CSR, and IP CSR are slave targets of the interconnect. AXI4 is the memory interface for IMEM, DMEM, and the DMA memory port; DMA CSR and IP CSR use AXI4-Lite through the interconnect. Reuse existing DMA IP, with any necessary endpoint protocol/width adaptation in the interconnect rather than requiring a new custom DMA. IMEM stores firmware; DMEM stores CPU data/stack and KEM I/O buffers. The RBG supplies seeds to the trusted host driver. DMA moves the bulk data while the CPU can execute other work and receive completion/error interrupts. In a system diagram, a master-to-slave arrow denotes request initiation; AXI responses/read data return through the same interface.
+The CPU and the DMA memory ports are AXI4 masters; IMEM, DMEM, the IP buffer, DMA CSR, and IP CSR are slave targets of the interconnect. AXI4 is the memory interface for IMEM, DMEM, the IP buffer and the DMA memory ports; DMA CSR and IP CSR use AXI4-Lite through the interconnect. Reuse existing DMA IP, with any necessary endpoint protocol/width adaptation in the interconnect rather than requiring a new custom DMA. IMEM stores firmware; DMEM stores CPU data/stack and KEM I/O buffers. The RBG supplies seeds to the trusted host driver. DMA moves the bulk data while the CPU can execute other work and receive completion/error interrupts. In a system diagram, a master-to-slave arrow denotes request initiation; AXI responses/read data return through the same interface.
 
 ### 3.1 Constituent IP and integration work
 
 | Function | Checkout evidence | Integration obligation |
 |---|---|---|
-| Hash/XOF | [`keccak_top.v`](../rtl/modules/hash/keccak/keccak_top.v) (SHA3-256/512, SHAKE128/256) driven by [`mlkem_hash.v`](../rtl/modules/hash/mlkem_hash.v). | Done: per-operation job list, absorb assembly from the tap FIFO, squeeze distribution, input-register wipe at the end. |
+| Hash/XOF | [`keccak_sponge.v`](../rtl/modules/hash/keccak/keccak_sponge.v) (SHA3-256/512, SHAKE128/256) driven by [`mlkem_hash.v`](../rtl/modules/hash/mlkem_hash.v). | Done: per-operation job list, absorb assembly from the tap FIFO, squeeze distribution, input-register wipe at the end. |
 | Sampling | [`mlkem_sampler.v`](../rtl/modules/sampler/mlkem_sampler.v) (SampleNTT, 8 candidates/cycle) and [`mlkem_cbd_stream.v`](../rtl/modules/poly/mlkem_cbd_stream.v) (CBD per lane). | Done. |
 | Polynomial arithmetic | Nine [`ntt_core_top`](../rtl/modules/poly/ntt/ntt_core_top.v) lanes ([`mlkem_lane.v`](../rtl/modules/poly/mlkem_lane.v)) and [`mlkem_pmac.v`](../rtl/modules/poly/mlkem_pmac.v) (base multiplication with accumulation). | Done; scaling conventions in Section 3.3. |
 | Serialization | [`mlkem_unpack.v`](../rtl/modules/stream/mlkem_unpack.v), [`mlkem_pack.v`](../rtl/modules/stream/mlkem_pack.v), [`mlkem_compress.v`](../rtl/modules/poly/mlkem_compress.v), decompression in [`mlkem_funcs.vh`](../rtl/utils/mlkem_funcs.vh). | Done for widths `1,4,5,10,11,12`. |
 | Schedule | Fixed programs per engine in [`mlkem_in.v`](../rtl/modules/stream/mlkem_in.v), [`mlkem_hash.v`](../rtl/modules/hash/mlkem_hash.v), [`mlkem_lane.v`](../rtl/modules/poly/mlkem_lane.v), [`mlkem_pmac.v`](../rtl/modules/poly/mlkem_pmac.v), [`mlkem_out.v`](../rtl/modules/stream/mlkem_out.v); control in [`mlkem_core.v`](../rtl/modules/top/mlkem_core.v). | Done. |
-| SoC top | [`mlkem_axi.v`](../rtl/modules/top/mlkem_axi.v): Section 4 registers, streams, interrupt. | Remaining: DMA integration, RBG connection, firmware and SoC build. |
+| SoC top | [`mlkem_axi.v`](../rtl/modules/top/mlkem_axi.v): Section 4 registers, interrupt; [`mlkem_iobuf.v`](../rtl/modules/storage/mlkem_iobuf.v): AXI4 slave on the request/result buffer. | Remaining: DMA integration, RBG connection, firmware and SoC build. |
 
 One accepted request shall be outstanding at a time. An internal transfer shall happen once on its documented handshake; fields shall remain stable during backpressure. Within a request, the compute functions run concurrently (Section 3.3): a consumer shall only read a polynomial block after its producer has completed that block of the current object. These rules are independent of the final signal names.
 
 ### 3.2 Objects and representations
 
-The logical objects are `A,S,E,T,Y,E1,E2,U,V,M,W,EK,DK,C,K,TEMP`. A conservative allocation without lifetime reuse at `k = 4` holds `A` (`k²` polynomials), six vectors `S,E,T,Y,E1,U` (`6k`), four single polynomials `E2,V,M,W`, and `TEMP` (up to `k`): `k² + 7k + 4 = 48` polynomials. At 256 coefficients × 16-bit storage each, this is `48 × 512 = 24,576` bytes. This calculation is a storage estimate, not a fixed 32 KiB allocation. The implemented schedule shall size banked LUTRAM and small FIFOs from simultaneously live objects and may generate matrix polynomials as needed. `EK,DK,C,K` are byte objects transferred between DMEM and private IP storage through the streams in Section 4; system SRAM and IP working memory are separate.
+The logical objects are `A,S,E,T,Y,E1,E2,U,V,M,W,EK,DK,C,K,TEMP`. A conservative allocation without lifetime reuse at `k = 4` holds `A` (`k²` polynomials), six vectors `S,E,T,Y,E1,U` (`6k`), four single polynomials `E2,V,M,W`, and `TEMP` (up to `k`): `k² + 7k + 4 = 48` polynomials. At 256 coefficients × 16-bit storage each, this is `48 × 512 = 24,576` bytes. This calculation is a storage estimate, not a fixed 32 KiB allocation. The implemented schedule shall size banked LUTRAM and small FIFOs from simultaneously live objects and may generate matrix polynomials as needed. `EK,DK,C,K` are byte objects copied between DMEM and the IP buffer of Section 4; system SRAM and IP working memory are separate.
 
 Before object-store RTL is frozen, the integration shall record each object's producer/consumer, representation, first/last use, and secrecy. Storage aliasing is allowed only after the prior object's last use. `d,z,m,r,dk,K` and secret polynomial intermediates require protected handling even where no sequencer object ID exists.
 
@@ -112,53 +112,51 @@ At every compute boundary the design shall document canonical versus centered va
 
 | Engine | Work |
 |---|---|
-| Input (`mlkem_in`) | Register slice limited to the request's words; framing checks; ByteDecode into the `S`, `T`, `C` stores (Encaps `ek` modulus check); `ρ`, `h`, `z` registers; `ek` and `c` words tapped into the hash FIFO. |
-| Hash (`mlkem_hash`, one `keccak_top`) | KeyGen: G, PRF ×2k, XOF ×k², H(ek). Encaps: H(ek), G, PRF ×k, XOF ×k², PRF ×(k+1). Decaps: H(ek) check, XOF ×k², G, PRF ×(2k+1), J. A final empty absorb overwrites the Keccak input registers. |
+| Input (`mlkem_in`) | Register slice limited to the request's words, read from the I/O buffer; ByteDecode into the `S`, `T`, `C` stores (Encaps `ek` modulus check); `ρ`, `h`, `z` registers; `ek` and `c` words tapped into the hash FIFO. |
+| Hash (`mlkem_hash`, one `keccak_sponge`) | KeyGen: G, PRF ×2k, XOF ×k², H(ek). Encaps: H(ek), G, PRF ×k, XOF ×k², PRF ×(k+1). Decaps: H(ek) check, XOF ×k², G, PRF ×(2k+1), J. A final empty absorb overwrites the Keccak input registers. |
 | Sampler (`mlkem_sampler`) | SampleNTT at 8 candidates per cycle into the matrix store (`k²` slots, split by row parity). A precount of the block in the squeeze window tells the hash engine which block completes the polynomial. |
 | NTT lanes (`mlkem_lane` ×9) | Lanes 0..3: NTT of `s`/`y`/`u′` with CBD or decompression at load; lanes 4..7: INTT of the `u` rows with `+e1`, Compress and C write or compare at unload (KeyGen: NTT of `e`); lane 8: INTT of `v` (`+e2+µ`) and Decaps `w = v′ − INTT(·)` → `m′`. Unloading writes zeros behind the read. |
 | PMAC (`mlkem_pmac`) | `Σ_j M[r][j] ∘ V[j]` with two four-lane groups (two rows per step, 16 coefficients/cycle), lazy Montgomery accumulation, dynamic row-pair scheduling. |
-| Output (`mlkem_out`) | ByteEncode / packet assembly from the stores and registers, `ê` added to `t̂` in KeyGen, register slice on the port; the first `ek` copy of KeyGen is tapped into the hash FIFO for H(ek). |
+| Output (`mlkem_out`) | ByteEncode / result assembly from the stores and registers, `ê` added to `t̂` in KeyGen, register slice on the port; the first `ek` copy of KeyGen is tapped into the hash FIFO for H(ek). |
 
 Scaling at the compute boundaries: the NTT IP returns the exact FIPS 203 NTT; it runs with `INTT_SCALE = 0` (no scale pass), so its INTT returns `128·INTT`. The PMAC returns `(M ∘ V)·R⁻¹` (`R = 2^16`); the vector lanes unload `ŷ·2^9` and `û′·2^9`, so encryption and decryption obtain exact `u`, `v`, `w`; KeyGen feeds `ŝ·R` (formed at the lane unload) and adds `ê` in the encoder, giving exact `t̂`. Coefficients are canonical in `[0, q)` everywhere except the CBD outputs, which are mapped to `[0, q)` when produced. Coefficient `n` of a polynomial lives in bank `n mod 8`, word `n / 8`.
 
 Object mapping: `A` → matrix store; `S` (Decaps `ŝ`, KeyGen dk `ŝ`) and `T` (`t̂`) → 4-slot stores; `C` → compressed `u`, `v` values (Decaps input `c`, Encaps output); `Y`/`ŝ·R`/`û′` → buffers of lanes 0..3; `û` rows, KeyGen `ê` → buffers of lanes 4..7; `v̂`/`ŵ` → buffer of lane 8; PRF bytes → per-lane noise memories; `m′` → register. Secret storage (lane buffers, noise memories, `S`, seeds, `m′`, PRF seed, keys, Keccak capture) is cleared before DONE; after an error, ABORT or reset the NTT cores are also zeroed before READY.
 
-The native core interface (`start`, `op`, `pset`, `seed[511:0]`, `abort`, `ready`, `done`, `error`, `err_code`, 64-bit AXI4-Stream in/out) is wrapped by `mlkem_axi` into the Section 4 register map.
+The native core interface (`start`, `op`, `pset`, 32-bit seed-word writes, `abort`, `ready`, `done`, `error`, `err_code`, 64-bit valid/ready request and result words) is wrapped by `mlkem_axi` into the Section 4 register map; `mlkem_iobuf` feeds the request words from the buffer and stores the result words into it.
 
 ## 4. Host interface and transaction lifecycle
 
-The SoC uses an AXI4-Lite slave aperture for CSR and seed access. A DMA engine transfers complete objects between DMEM and the IP through AXI4-Stream; its memory port is an AXI4 master and its control registers are reached through the interconnect. All offsets below are relative to the IP aperture base assigned in the SoC address map. Each CSR word carries four consecutive FIPS 203 bytes, with the lowest-addressed byte in bits `[7:0]`. Software CSR accesses shall be aligned 32-bit transfers with all four write strobes asserted. The AXI4-Lite interface shall handle independent address/data handshakes and return protocol-correct responses, including `SLVERR` for unsupported offsets, partial write strobes, directions, or lifecycle accesses. The trusted driver alone shall map this aperture into CPU address space.
+The IP has two slave ports on one clock (`aclk`, active-low `aresetn`): an AXI4-Lite aperture for the registers and the seed words (`s_axil`, 32-bit data, 4 KB), and an AXI4 aperture for the request/result buffer (`s_axi`, 64-bit data, 8 KB). The SoC address map places both apertures; the offsets below are relative to their bases. The CPU, or a memory-to-memory DMA such as AXI CDMA programmed by the trusted driver, moves the byte objects between DMEM and the buffer; the IP has no stream port. The trusted driver alone shall map the register aperture into CPU address space.
+
+**Register aperture.** Each register is a 32-bit word; a seed word carries four consecutive FIPS 203 bytes, with the lowest-addressed byte in bits `[7:0]`. Software accesses shall be aligned 32-bit transfers with all four write strobes asserted. The AXI4-Lite interface handles independent address/data handshakes and returns `SLVERR` for unsupported offsets, partial write strobes, wrong directions and commands that are illegal in the current state, without side effects.
 
 | Offset | Name | Access | Meaning |
 |---:|---|---|---|
 | `0x000` | `CONTROL` | WO | Write exactly one pulse: bit 0 `START`, bit 1 `ABORT`, bit 2 `ACK`. Other bits shall be zero. |
-| `0x004` | `STATUS` | RO | Bit 0 `READY`, bit 1 `BUSY`, bit 2 `DONE`, bit 3 `ERROR`; all other bits zero. `DONE` and `ERROR` are mutually exclusive and remain set until `ACK` or reset. |
-| `0x008` | `ERRCODE` | RO | `0` none; `1` invalid configuration; `2` length/capacity or stream framing; `3` invalid key; `4` missing seed; `5` compute failure; `6` aborted. |
-| `0x00C` | `CONFIG` | RW | Bits `[1:0]`: operation `0` KeyGen, `1` Encaps, `2` Decaps. Bits `[3:2]`: set `0` ML-KEM-512, `1` ML-KEM-768, `2` ML-KEM-1024. Encoding `3` in either field is invalid; other bits shall be zero. |
-| `0x010` | `IN0_LEN` | RW | Input 0 byte count. |
-| `0x014` | `IN1_LEN` | RW | Input 1 byte count. |
-| `0x018` | `OUT0_CAP` | RW | Output 0 capacity in bytes. |
-| `0x01C` | `OUT1_CAP` | RW | Output 1 capacity in bytes. |
-| `0x020–0x03C` | Reserved | — | Unmapped; accesses return `SLVERR`. |
-| `0x040–0x07F` | `SEED` | WO | KeyGen `d || z` (64 bytes) or Encaps `m` (32 bytes), supplied by the trusted host driver. |
+| `0x004` | `STATUS` | RO | Bit 0 `READY`, bit 1 `BUSY`, bit 2 `DONE`, bit 3 `ERROR`; all other bits zero. `DONE` and `ERROR` are mutually exclusive and remain set until `ACK` or reset. All four bits are zero while the buffer wipe after `ACK` or reset runs. |
+| `0x008` | `ERRCODE` | RO | `0` none; `1` invalid configuration; `3` invalid key; `4` missing seed; `6` aborted. Codes `2` and `5` are not produced (`2` was stream framing in interface 1.0). |
+| `0x00C` | `CONFIG` | RW | Bits `[1:0]`: operation `0` KeyGen, `1` Encaps, `2` Decaps. Bits `[3:2]`: set `0` ML-KEM-512, `1` ML-KEM-768, `2` ML-KEM-1024. Encoding `3` in either field is invalid; other bits shall be zero. Written only while `READY=1`. |
+| `0x010` | `IRQ_ENABLE` | RW | Bit 0: `irq` follows `DONE` or `ERROR`. Resets to zero; other bits shall be zero. |
+| `0x014` | `VERSION` | RO | `0x0002_0000`: interface 2.0 (memory-mapped buffer). |
+| `0x018–0x03C` | Reserved | — | Unmapped; accesses return `SLVERR`. |
+| `0x040–0x07F` | `SEED` | WO | KeyGen `d || z` (words 0–15) or Encaps `m` (words 0–7), supplied by the trusted host driver while `READY=1`. |
 
-The bulk buffers retain the logical names `IN0`, `IN1`, `OUT0`, and `OUT1`, but reside in DMEM and are transferred by DMA rather than through CSR data windows. Each request has at most one input packet and one output packet:
+**Buffer aperture.** The buffer holds 4736 bytes (592 64-bit words), the largest request (ML-KEM-1024 Decaps `dk || c`) and the largest result (ML-KEM-1024 KeyGen `ek || dk`). Byte `n` of an object is at aperture offset `n`, that is in bits `[8(n mod 8)+7 : 8(n mod 8)]` of word `n/8`, in FIPS 203 order. The request and the result both start at offset 0; their lengths are fixed by `CONFIG` (Section 2):
 
-| Operation | MM2S: DMA → IP | S2MM: IP → DMA |
+| Operation | Request, written before `START` | Result, read after `DONE` |
 |---|---|---|
-| KeyGen | None; both input lengths are zero | `ek || dk` (`OUT0=ek`, `OUT1=dk`) |
-| Encaps | `ek` (`IN0=ek`, `IN1_LEN=0`) | `c || K` (`OUT0=c`, `OUT1=K`) |
-| Decaps | `dk || c` (`IN0=dk`, `IN1=c`) | `K` (`OUT0=K`, `OUT1_CAP=0`) |
+| KeyGen | None | `ek || dk` (`dk` at offset `384k + 32`) |
+| Encaps | `ek` | `c || K` (`K` at offset `32(dᵤk + dᵥ)`) |
+| Decaps | `dk || c` (`c` at offset `768k + 96`) | `K` |
 
-`||` denotes concatenation in the shown order. Bytes follow FIPS order, earliest byte in the lowest stream lane. A beat transfers only on `TVALID && TREADY`; data, `TKEEP`, and `TLAST` remain stable during a stall. `TLAST` marks the final beat of each packet; only its final beat may have a partial, contiguous low-byte `TKEEP` mask. Packet length/termination shall match the selected operation. The stream width is 64 bits; every packet of Section 4 is a whole number of words, so `TKEEP` is `0xFF` on every beat and any other value is a framing error. The maximum input and output packet sizes are each 4736 bytes, for ML-KEM-1024 Decaps and KeyGen respectively. DMEM sizing shall include the active DMA buffers plus firmware data/stack; the CPU shall not modify active buffers.
+The AXI4 slave accepts INCR, FIXED and WRAP bursts of up to 256 beats, narrow transfers and byte strobes, with a 4-bit ID by default (parameter `ID_W`); it serves one burst at a time and alternates between waiting reads and writes. It has no exclusive-access monitor: an exclusive access completes with `OKAY`, which reports failure. Accesses are served while `BUSY=0` and no wipe runs (`READY`, `DONE` or `ERROR`). While `BUSY=1` or a wipe runs, every beat returns `SLVERR`, writes are ignored and reads return zero; so does every beat at offset 4736 or above, or with `AxSIZE` above 3. A burst accepted while the buffer is open completes on the buffer before a request or a wipe takes it; until it ends, the request, and the wipe after an `ABORT`, wait for it, so the driver shall complete its buffer transfers before it issues `START`. Because the object lengths follow from `CONFIG`, the IP cannot receive an object of the wrong length: the driver shall check the caller's `ek`, `dk` and `c` lengths against Section 2 and reject a wrong length before it writes the buffer.
 
-`CONFIG` and the four byte-count registers reset to zero and may be written only while `READY=1`; `ERRCODE` resets to zero. The driver shall program exact FIPS 203 input lengths, zero for unused inputs, capacities at least as large as the expected outputs, and zero for unused outputs. `START` shall reject invalid configuration, lengths/capacities, or incomplete seed-word coverage; the active request shall additionally check received input bytes and packet framing before releasing any result. Decaps requires no seed. A failure to obtain random bytes in the host driver shall prevent `START` and be reported to its caller; `ERRCODE=4` covers an incomplete seed window submitted to the IP.
+The driver shall check `READY`, write `CONFIG`, the `SEED` words (KeyGen, Encaps) and the request bytes, then issue `START`. `START` checks the configuration and the seed-word coverage since the previous `START` (all 16 words for KeyGen, words 0–7 for Encaps, none for Decaps), atomically latches the request and makes `BUSY=1`. A refused `START` sets `ERROR` with code `1` or `4` at once, clears the seed and leaves the buffer as it is. Another `START` while busy returns `SLVERR` and leaves the active request intact. The IP reads the request from the buffer while it computes and writes the result over it from offset 0; every result depends on the last request bytes (`ρ` closes `ek`, `K` needs all of `dk || c`), so no unread request byte is overwritten. It sets `DONE` after the last result word is stored and its secret scratch, input and seed storage is cleared. A correctly sized ciphertext that fails the Decaps re-encryption comparison still completes with `DONE=1` and the implicit-rejection `K`. The result stays in the buffer until `ACK`, which clears the outcome and code and wipes the whole buffer before `READY` returns. On a failure after `START` (invalid key, `ABORT`) the IP clears its secret storage and wipes the buffer, so no partial result remains, then sets `ERROR` and the code; `ACK` returns to `READY`. `ABORT` is accepted while busy. Reset clears the secret storage and wipes the buffer before `READY` rises; `READY=0` during reset and clearing.
 
-The driver shall check `READY`, prepare DMEM input/output buffers, write `SEED`, configuration and counts, and configure the DMA. It shall arm S2MM before output can arrive, issue `START`, then launch MM2S when the request has input. Simple DMA without scatter-gather is sufficient. `START` atomically latches the request and makes `BUSY=1`; another `START` while busy shall return `SLVERR` and leave the active request intact. The IP shall accept stream input only for that request and release output only after required checks and KEM computation succeed. It shall set `DONE` after the final output beat is accepted and secret scratch/input/seed clearing completes. On failure it shall invalidate private output state, clear secret scratch/input/seed storage, then set `ERROR` and the code. A correctly sized ciphertext that fails the Decaps re-encryption comparison still completes with `DONE=1` and the implicit-rejection `K`.
+`CONFIG` and `ERRCODE` reset to zero. The driver shall use device-memory ordering for register access and the platform's cache-coherency and maintenance rules for the DMEM side of a DMA copy. With `IRQ_ENABLE=1`, `DONE` or `ERROR` holds the level interrupt until `ACK`; the CPU may execute other work after `START`. It shall read the result only after `DONE`, and only through completed AXI transfers. On error or timeout, the driver shall abort the IP, discard any partial copy, `ACK` and resubmit. Firmware shall protect and erase the secret objects under its control in DMEM, including `dk` and `K`; the IP wipes its own buffer at `ACK` but does not clear DMEM.
 
-`ACK` is accepted only after `DONE` or `ERROR`; it clears the outcome, code and internal buffer-valid tracking before `READY` returns. `ABORT` is accepted while busy, invalidates the result, clears secret storage and then reports `ERROR` with code `6`; software uses `ACK` to return to `READY`. Reset invalidates results immediately and clears secret storage before asserting `READY`; `READY=0` during reset and clearing. Seed writes are accepted only while `READY=1`. The driver shall use device-memory ordering for CSR access and the platform's cache-coherency/maintenance rules for DMA buffers. `DONE` or `ERROR` asserts the IP interrupt until acknowledged; DMA completion/errors also reach the CPU through the platform interrupt controller. The CPU may execute other work after submission. It shall use outputs only after both IP success and all DMA transfers used by that request complete successfully. On error or timeout, the driver shall stop DMA, abort/reset the IP as needed, discard partial output and resynchronize the streams before submitting another request. Firmware shall protect and erase secret buffers under its control, including `dk` and `K`; IP clearing does not clear DMEM.
-
-The host randomness service shall provide independent fresh 32-byte `d` and `z` for each KeyGen and a fresh 32-byte `m` for each Encaps, using a NIST-approved RBG with at least the strength in Section 2. The deployed application cannot choose these bytes. For a FIPS-conformance claim, the claimed cryptographic-module boundary must include and control this generation step; the SoC release shall identify the actual provider, its approval basis, seeding/health behavior, and failure path. This specification does not assume that K26 contains a qualified TRNG. Deterministic seed injection is restricted to simulation or an isolated validation build. One accelerator clock domain is the starting point; the SoC build shall document its clock/reset constraints and any required clock crossing.
+The host randomness service shall provide independent fresh 32-byte `d` and `z` for each KeyGen and a fresh 32-byte `m` for each Encaps, using a NIST-approved RBG with at least the strength in Section 2. The deployed application cannot choose these bytes. For a FIPS-conformance claim, the claimed cryptographic-module boundary must include and control this generation step; the SoC release shall identify the actual provider, its approval basis, seeding/health behavior, and failure path. This specification does not assume that K26 contains a qualified TRNG. Deterministic seed injection is restricted to simulation or an isolated validation build. A failure to obtain random bytes in the host driver shall prevent `START` and be reported to its caller; `ERRCODE=4` covers an incomplete seed window submitted to the IP. The seed words stay in the register aperture, apart from the buffer that a DMA may fill, so only the trusted driver supplies them. One accelerator clock domain is the starting point; the SoC build shall document its clock/reset constraints and any required clock crossing.
 
 ### 4.1 Reserved PL TRNG/RBG hard-IP hook (optional, inactive)
 
@@ -201,7 +199,7 @@ The shared minimum regression shall include:
 2. Noncanonical `ek`, wrong `ek/dk/c` lengths, wrong stored `H(ek)`, unsupported operation/set and insufficient output capacity.
 3. A ciphertext of valid length chosen to fail re-encryption comparison: compare every byte, return the fallback key, and do not expose a rejection flag or error status.
 4. Host RBG-provider failure before `START`, incomplete seed coverage, unit/DMA failure, reset/abort during work, a second request while busy, and producer/consumer stalls; ensure no stale or partial output.
-5. Every CSR/seed and stream access rule in Section 4, packet framing, MMIO ordering, DMA-buffer coherency/ownership, interrupt completion while the CPU runs other work, output clearing, software timeout, and recovery after an error on the actual SoC.
+5. Every register, seed and buffer access rule in Section 4 (burst types, narrow transfers, strobes, accesses while busy or past the buffer), MMIO ordering, DMA-buffer coherency/ownership, interrupt completion while the CPU runs other work, buffer wiping, software timeout, and recovery after an error on the actual SoC.
 
 The simulation oracle shall be independent of RTL algorithms and ROM contents. Seeds, vector provenance, dependency revisions, and commands to reproduce results shall be saved. Functional coverage is complete only when the nine operation/set combinations and each listed error class have executed and passed. For the SoC product, simulation alone is insufficient: the CPU-driven test must run on the integrated platform. A UVM regression does not waive that test.
 
@@ -209,15 +207,15 @@ The simulation oracle shall be independent of RTL algorithms and ROM contents. S
 
 The SoC release shall contain the integrated RTL and dependency revisions, build scripts and constraints, generated hardware image, firmware/driver source, the frozen host interface description, test vectors and logs, and instructions that reproduce the build and CPU-driven test. The report shall give cycle counts and end-to-end latency for all nine operation/set cases, LUT/FF/LUTRAM/BRAM/URAM/DSP utilization separately for the ML-KEM IP and whole SoC, routed timing, and a power estimate or measurement. It shall identify the platform, activity assumptions, measurement boundary, and whether power was estimated or measured. Until such reports exist for the SoC, no SoC frequency, area, power or board-operation result is claimed.
 
-Current IP-level evidence (simulation and out-of-context implementation of `mlkem_core`, 64-bit streams, always-ready streams; cycles from `start` to `done`, including secret clearing):
+Current IP-level evidence (simulation and out-of-context implementation of `mlkem_axi`; cycles from the `START` register write to `DONE`, including the request and result moves between the IP buffer and the core and the secret clearing, excluding the host copies into and out of the buffer; the native core takes two cycles less):
 
 | Set | KeyGen | Encaps | Decaps |
 |---|---:|---:|---:|
-| ML-KEM-512 | 1,900 | 3,023 | 5,707 |
-| ML-KEM-768 | 2,014 | 3,142 | 5,849 |
-| ML-KEM-1024 | 2,198 | 3,365 | 6,157 |
+| ML-KEM-512 | 1,907 | 3,039 | 5,731 |
+| ML-KEM-768 | 2,021 | 3,158 | 5,873 |
+| ML-KEM-1024 | 2,215 | 3,376 | 6,181 |
 
-Routed out-of-context, Vivado 2025.2.1, top `mlkem_axi` (AXI wrapper included): K26 (`xck26-sfvc784-2LV-c`) meets 4.0 ns (250 MHz; WNS +0.276 ns, WHS +0.036 ns, estimated Fmax about 268 MHz) with 40,323 LUT (4,762 as distributed RAM, 825 as shift registers), 25,091 FF, 0 BRAM, 0 URAM, 0 DSP; Vivado's vectorless power estimate is 1.51 W. Details and the critical paths are in [RESULT.md](RESULT.md). These are IP measurements; they do not cover the DMA, interconnect or board.
+Routed out-of-context, Vivado 2025.2.1, top `mlkem_axi` (both AXI slaves and the 4736-byte buffer included): Artix-7 XC7A200T-3 (`xc7a200tfbg676-3`, the device of the comparison paper [15]) meets 4.4 ns (227 MHz; WNS +0.135 ns, WHS +0.054 ns, estimated Fmax about 234 MHz) with 40,304 LUT (6,574 as distributed RAM, 809 as shift registers), 29,330 FF, 0 BRAM, 0 URAM, 0 DSP; Vivado's vectorless power estimate is 2.07 W. Details, the comparison with [15] and the critical paths are in [RESULT.md](RESULT.md). These are IP measurements of an out-of-context build, not integrated SoC results.
 
 | Decision needed before implementation of the affected boundary | Current state |
 |---|---|
