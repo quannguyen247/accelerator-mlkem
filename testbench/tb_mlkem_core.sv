@@ -2,8 +2,8 @@
 
 // Self-checking testbench for mlkem_core (no UVM).
 // Vectors come from vector/mlkem_gen.py (FIPS 203 model).
-// Plusargs: +PERF        always-ready streams (cycle counts)
-//           +STALL=<pct> stall probability on both streams (default 30)
+// Plusargs: +PERF        always-ready request/result ports (cycle counts)
+//           +STALL=<pct> stall probability on both ports (default 30)
 //           +SEED=<n>    stall pattern seed
 module tb_mlkem_core;
 
@@ -18,30 +18,26 @@ module tb_mlkem_core;
     reg start = 1'b0;
     reg [1:0] op = 2'd0;
     reg [1:0] pset = 2'd0;
-    reg [511:0] seed = 512'd0;
+    reg [15:0] seed_we = 16'd0;
+    reg [31:0] seed_wdata = 32'd0;
     reg abort = 1'b0;
     wire ready, done, error;
     wire [2:0] err_code;
 
     reg [63:0] s_tdata = 64'd0;
-    reg [7:0] s_tkeep = 8'hFF;
-    reg s_tlast = 1'b0;
     reg s_tvalid = 1'b0;
     wire s_tready;
     wire [63:0] m_tdata;
-    wire [7:0] m_tkeep;
-    wire m_tlast;
     wire m_tvalid;
     reg m_tready = 1'b0;
 
     mlkem_core dut (
         .clk(clk), .rst_n(rst_n),
-        .start(start), .op(op), .pset(pset), .seed(seed), .abort(abort),
+        .start(start), .op(op), .pset(pset),
+        .seed_we(seed_we), .seed_wdata(seed_wdata), .seed_clr(1'b0), .abort(abort),
         .ready(ready), .done(done), .error(error), .err_code(err_code),
-        .s_axis_tdata(s_tdata), .s_axis_tkeep(s_tkeep), .s_axis_tlast(s_tlast),
-        .s_axis_tvalid(s_tvalid), .s_axis_tready(s_tready),
-        .m_axis_tdata(m_tdata), .m_axis_tkeep(m_tkeep), .m_axis_tlast(m_tlast),
-        .m_axis_tvalid(m_tvalid), .m_axis_tready(m_tready)
+        .in_data(s_tdata), .in_valid(s_tvalid), .in_ready(s_tready),
+        .out_data(m_tdata), .out_valid(m_tvalid), .out_ready(m_tready)
     );
 
     reg [63:0] hdr [0:MAX_CASES-1];
@@ -61,7 +57,7 @@ module tb_mlkem_core;
     string op_name [0:3] = '{"KeyGen", "Encaps", "Decaps", "Bad"};
     string set_name [0:3] = '{"ML-KEM-512 ", "ML-KEM-768 ", "ML-KEM-1024", "Bad        "};
 
-    // Per-request state shared by the stream tasks (no ref ports, so the bench
+    // Per-request state shared by the port tasks (no ref ports, so the bench
     // also runs on simulators without reference-port support).
     bit stop;
     integer errors;
@@ -71,8 +67,8 @@ module tb_mlkem_core;
         return !perf && (($urandom % 100) < stall_pct);
     endfunction
 
-    // Drives the input packet; trunc_at >= 0 asserts TLAST early on that word.
-    task automatic drive_input(input integer base, input integer nwords, input integer trunc_at);
+    // Drives the request words.
+    task automatic drive_input(input integer base, input integer nwords);
         integer w;
         w = 0;
         while (w < nwords && !stop) begin
@@ -82,20 +78,12 @@ module tb_mlkem_core;
             end else begin
                 s_tvalid <= 1'b1;
                 s_tdata <= in_mem[base + w];
-                s_tkeep <= 8'hFF;
-                s_tlast <= (w == nwords - 1) || (w == trunc_at);
                 @(posedge clk);
                 while (!s_tready && !stop) @(posedge clk);
-                if (w == trunc_at) begin
-                    s_tvalid <= 1'b0;
-                    s_tlast <= 1'b0;
-                    return;
-                end
                 w = w + 1;
             end
         end
         s_tvalid <= 1'b0;
-        s_tlast <= 1'b0;
     endtask
 
     task automatic check_output(input integer base, input integer nwords);
@@ -108,12 +96,10 @@ module tb_mlkem_core;
                     errors = errors + 1;
                     if (errors < 4) $display("    extra output word %0d: %016h", got, m_tdata);
                 end else begin
-                    if (m_tdata !== out_mem[base + got] || m_tkeep !== 8'hFF ||
-                        m_tlast !== (got == nwords - 1)) begin
+                    if (m_tdata !== out_mem[base + got]) begin
                         errors = errors + 1;
                         if (errors < 4)
-                            $display("    word %0d: got %016h last=%0b exp %016h", got, m_tdata, m_tlast,
-                                     out_mem[base + got]);
+                            $display("    word %0d: got %016h exp %016h", got, m_tdata, out_mem[base + got]);
                     end
                 end
                 got = got + 1;
@@ -125,7 +111,7 @@ module tb_mlkem_core;
     task automatic run_case(input string name, input integer c_op, input integer c_set,
                             input integer exp_err, input integer sbase, input integer ibase,
                             input integer nin, input integer obase, input integer nout,
-                            input integer trunc_at, input integer abort_after);
+                            input integer abort_after);
         integer t0, t1, i;
         bit got_done, got_err;
         integer code;
@@ -135,8 +121,12 @@ module tb_mlkem_core;
         while (!ready) @(posedge clk);
         op <= c_op[1:0];
         pset <= c_set[1:0];
-        for (i = 0; i < 8; i = i + 1)
-            seed[64*i +: 64] <= seeds[sbase + i];
+        for (i = 0; i < 16; i = i + 1) begin
+            seed_we <= 16'd1 << i;
+            seed_wdata <= seeds[sbase + i / 2][32 * (i % 2) +: 32];
+            @(posedge clk);
+        end
+        seed_we <= 16'd0;
         start <= 1'b1;
         @(posedge clk);
         start <= 1'b0;
@@ -146,7 +136,7 @@ module tb_mlkem_core;
         code = 0;
         fork
             begin
-                if (nin > 0) drive_input(ibase, nin, trunc_at);
+                if (nin > 0) drive_input(ibase, nin);
             end
             begin
                 check_output(obase, nout);
@@ -210,7 +200,7 @@ module tb_mlkem_core;
             $finish;
         end
         if (perf)
-            $display("Loaded %0d vector cases, always-ready streams", n_cases);
+            $display("Loaded %0d vector cases, always-ready ports", n_cases);
         else
             $display("Loaded %0d vector cases, stall %0d%%", n_cases, stall_pct);
 
@@ -231,7 +221,7 @@ module tb_mlkem_core;
                 tag = $sformatf("%0d %s %s (expect error %0d)", c, set_name[c_set], op_name[c_op], c_err);
             else
                 tag = $sformatf("%0d %s %s", c, set_name[c_set], op_name[c_op]);
-            run_case(tag, c_op, c_set, c_err, 8 * c, ib, nin, ob, nout, -1, 0);
+            run_case(tag, c_op, c_set, c_err, 8 * c, ib, nin, ob, nout, 0);
             if (c_op == 1 && c_err == 0 && first_enc_nin < 0) begin
                 first_enc_ib = ib;
                 first_enc_nin = nin;
@@ -243,12 +233,10 @@ module tb_mlkem_core;
         end
 
         if (first_enc_nin > 0) begin
-            run_case("framing: early TLAST", 1, first_enc_set, 2, first_enc_sb, first_enc_ib,
-                     first_enc_nin, 0, 0, first_enc_nin / 2, 0);
             run_case("abort during Encaps", 1, first_enc_set, 6, first_enc_sb, first_enc_ib,
-                     first_enc_nin, 0, 0, -1, 1500);
+                     first_enc_nin, 0, 0, 1500);
         end
-        run_case("invalid configuration", 3, 0, 1, 0, 0, 0, 0, 0, -1, 0);
+        run_case("invalid configuration", 3, 0, 1, 0, 0, 0, 0, 0, 0);
 
         // Recovery: the first vectors must still pass after the error cases.
         ib = 0;
@@ -257,7 +245,7 @@ module tb_mlkem_core;
             nin = hdr[c][39:20];
             nout = hdr[c][19:0];
             run_case($sformatf("recovery %0d %s %s", c, set_name[hdr[c][55:48]], op_name[hdr[c][63:56]]),
-                     hdr[c][63:56], hdr[c][55:48], hdr[c][47:40], 8 * c, ib, nin, ob, nout, -1, 0);
+                     hdr[c][63:56], hdr[c][55:48], hdr[c][47:40], 8 * c, ib, nin, ob, nout, 0);
             ib = ib + nin;
             ob = ob + nout;
         end
