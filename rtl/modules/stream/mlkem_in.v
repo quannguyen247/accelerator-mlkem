@@ -3,10 +3,11 @@
 
 // Input stream engine. Decodes the request packet segment by segment into the
 // S, T and C stores and the rho/h/z registers, taps the hashed bytes into the
-// FIFO, and checks framing and the Encaps modulus condition.
+// FIFO, and checks the Encaps modulus condition.
 //   Encaps: ek = t^ (12-bit, checked) || rho
 //   Decaps: dk = s^ || t^ || rho || h || z, then c = c1 (du) || c2 (dv)
-// A register slice isolates the port; it accepts exactly the request's words.
+// A register slice isolates the port; it accepts exactly the request's words
+// (the I/O buffer supplies them in order, so there is no framing to check).
 module mlkem_in (
     input wire clk,
     input wire rst_n,
@@ -19,10 +20,8 @@ module mlkem_in (
     input wire [2:0] k,
     output wire busy,
 
-    // Request stream
+    // Request words
     input wire [63:0] s_tdata,
-    input wire [7:0] s_tkeep,
-    input wire s_tlast,
     input wire s_tvalid,
     output wire s_tready,
 
@@ -31,11 +30,13 @@ module mlkem_in (
     output wire [63:0] fifo_din,
     input wire fifo_full,
 
-    // Decoded blocks to the stores
-    output reg st_we,
-    output reg [1:0] st_dest,      // 0: S, 1: T, 2: C
-    output reg [2:0] st_slot,
+    // Decoded blocks to the stores: one write strobe per slot of the S, T
+    // and C stores, the block index and whether it is block 0
+    output reg [3:0] st_we_s,
+    output reg [3:0] st_we_t,
+    output reg [4:0] st_we_c,
     output reg [4:0] st_blk,
+    output reg st_first,
     output reg [95:0] st_data,
 
     // Decoded byte strings
@@ -46,9 +47,8 @@ module mlkem_in (
     output reg [255:0] z,
     output reg z_v,
 
-    // Framing / key check errors
-    output reg err,
-    output reg [2:0] err_code
+    // Encaps modulus check failed
+    output reg err
 );
 
     `include "mlkem_funcs.vh"
@@ -167,6 +167,7 @@ module mlkem_in (
 
     // Stage B: decoded block registered, then reduced/checked and written.
     reg bv;
+    reg key_bad;                    // Encaps ek check failed (registered, reported next cycle)
     reg b_reg_seg;
     reg b_d12;
     reg b_chk;
@@ -209,27 +210,30 @@ module mlkem_in (
             blk_left <= 8'd0;
             seg_more_reg <= 1'b0;
             blk_more_reg <= 1'b0;
-            st_we <= 1'b0;
+            st_we_s <= 4'd0;
+            st_we_t <= 4'd0;
+            st_we_c <= 5'd0;
+            key_bad <= 1'b0;
             rho_v <= 1'b0;
             h_v <= 1'b0;
             z_v <= 1'b0;
             err <= 1'b0;
-            err_code <= `MLKEM_ERR_NONE;
             bv <= 1'b0;
         end else begin
-            st_we <= 1'b0;
+            st_we_s <= 4'd0;
+            st_we_t <= 4'd0;
+            st_we_c <= 5'd0;
             err <= 1'b0;
             bv <= 1'b0;
-
-            // Port side: framing of each accepted beat.
-            if (s_acc) begin
-                acc_left <= acc_left - 10'd1;
-                if (s_tkeep != 8'hFF || s_tlast != (acc_left == 10'd1)) begin
-                    err <= 1'b1;
-                    err_code <= `MLKEM_ERR_FRAME;
-                    on <= 1'b0;
-                end
+            key_bad <= 1'b0;
+            if (key_bad) begin
+                err <= 1'b1;
+                on <= 1'b0;
             end
+
+            // Port side: words still to accept
+            if (s_acc)
+                acc_left <= acc_left - 10'd1;
 
             if (active && up_valid) begin
                 bv <= 1'b1;
@@ -240,20 +244,23 @@ module mlkem_in (
                 b_slot <= sslot0 + {1'b0, bcnt[6:5]};
                 b_blk <= bcnt[4:0];
                 b_sreg <= sreg;
-                b_vals <= (sk == SK_REG) ? up_raw : up_vals;
+                b_vals <= up_vals;          // byte strings (d = 8) pass raw
             end
             if (bv) begin
                 if (!b_reg_seg) begin
-                    st_we <= 1'b1;
-                    st_dest <= b_dest;
-                    st_slot <= b_slot;
-                    st_blk <= b_blk;
-                    st_data <= red;
-                    if (b_chk && bad) begin
-                        err <= 1'b1;
-                        err_code <= `MLKEM_ERR_KEY;
-                        on <= 1'b0;
+                    for (i = 0; i < 5; i = i + 1) begin
+                        if (b_slot == i) begin
+                            if (i < 4) begin
+                                st_we_s[i] <= (b_dest == 2'd0);
+                                st_we_t[i] <= (b_dest == 2'd1);
+                            end
+                            st_we_c[i] <= (b_dest == 2'd2);
+                        end
                     end
+                    st_blk <= b_blk;
+                    st_first <= (b_blk == 5'd0);
+                    st_data <= red;
+                    key_bad <= b_chk && bad;
                 end else begin
                     case (b_sreg)
                         2'd0: rho[b_blk[1:0]*64 +: 64] <= b_vals[63:0];

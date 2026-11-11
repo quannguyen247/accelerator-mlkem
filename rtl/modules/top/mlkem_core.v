@@ -8,12 +8,17 @@
 // reads, so the Keccak, the nine NTT lanes, the multiply-accumulate unit and
 // both stream engines overlap. One request is active at a time.
 //
-//   input stream -> mlkem_in --> S / T / C stores, rho/h/z, hash FIFO
+//   request words -> mlkem_in --> S / T / C stores, rho/h/z, hash FIFO
 //   mlkem_hash (keccak_top) --> sampler (A store), lane noise, rho/K/h
 //   lanes 0..3 (NTT), 4..7 (INTT, KeyGen NTT), 8 (INTT) <-> mlkem_pmac
-//   mlkem_out <-- S / T / C stores and registers --> output stream
+//   mlkem_out <-- S / T / C stores and registers --> result words
 //
-// seed[255:0] is d (KeyGen) or m (Encaps); seed[511:256] is z (KeyGen).
+// The request and result words (64-bit, FIPS 203 byte order, lowest byte in
+// bits [7:0]) move on valid/ready ports; the core takes exactly the words of
+// its request and emits exactly the words of its result.
+// Seed words (32-bit) are written while ready: words 0..7 are d (KeyGen) or
+// m (Encaps), words 8..15 are z (KeyGen). The seed is cleared at the end of
+// every request and by seed_clr.
 module mlkem_core (
     input wire clk,
     input wire rst_n,
@@ -21,24 +26,24 @@ module mlkem_core (
     input wire start,
     input wire [1:0] op,
     input wire [1:0] pset,
-    input wire [511:0] seed,
+    input wire [15:0] seed_we,
+    input wire [31:0] seed_wdata,
+    input wire seed_clr,
     input wire abort,
     output wire ready,
     output reg done,
     output reg error,
     output reg [2:0] err_code,
 
-    input wire [63:0] s_axis_tdata,
-    input wire [7:0] s_axis_tkeep,
-    input wire s_axis_tlast,
-    input wire s_axis_tvalid,
-    output wire s_axis_tready,
+    // Request words
+    input wire [63:0] in_data,
+    input wire in_valid,
+    output wire in_ready,
 
-    output wire [63:0] m_axis_tdata,
-    output wire [7:0] m_axis_tkeep,
-    output wire m_axis_tlast,
-    output wire m_axis_tvalid,
-    input wire m_axis_tready
+    // Result words
+    output wire [63:0] out_data,
+    output wire out_valid,
+    input wire out_ready
 );
 
     `include "mlkem_funcs.vh"
@@ -54,6 +59,7 @@ module mlkem_core (
     reg [255:0] seed_a;
     reg [255:0] seed_z;
     reg go;
+    reg launch;                     // op_r / k_r latched, go follows next cycle
     reg kill;
     reg scrub;
     reg scrub_r;
@@ -66,23 +72,23 @@ module mlkem_core (
     reg fail;
     reg [2:0] fail_code;
 
-    assign ready = (tstate == IDLE);
+    assign ready = (tstate == IDLE) && !launch;
 
     // Engines
     wire in_busy, out_busy, hsh_busy, pmac_busy;
     wire out_secrets_read;
     wire [8:0] lane_busy;
     wire in_err;
-    wire [2:0] in_err_code;
     wire hfail;
 
     wire fifo_push_in, fifo_push_out, fifo_pop, fifo_full, fifo_empty;
     wire [63:0] fifo_din_in, fifo_din_out, fifo_dout;
 
-    wire st_we;
-    wire [1:0] st_dest;
-    wire [2:0] st_slot;
+    wire [3:0] st_we_s;
+    wire [3:0] st_we_t;
+    wire [4:0] st_we_c;
     wire [4:0] st_blk;
+    wire st_first;
     wire [95:0] st_data;
     wire [255:0] in_rho, in_h, in_z;
     wire in_rho_v, in_h_v, in_z_v;
@@ -105,10 +111,11 @@ module mlkem_core (
     wire [2:0] pm_ae_slot, pm_ao_slot;
     wire [4:0] pm_a_blk, pm_s_blk, pm_t_blk, pm_v_blk;
     wire [1:0] pm_s_slot, pm_t_slot, pm_v_slot;
-    wire pm_wr0_en, pm_wr1_en, pm_wr_t, pm_wr0_ep, pm_wr1_ep;
-    wire [2:0] pm_wr0_row, pm_wr1_row;
-    wire [3:0] pm_wr0_lane, pm_wr1_lane;
+    wire [3:0] pm_wr_t_en;
+    wire [8:4] pm_wr_lane_en;
+    wire pm_wr8_p1, pm_wr8_ep;
     wire [4:0] pm_wr_blk;
+    wire pm_wr_first;
     wire [95:0] pm_wr0_data, pm_wr1_data;
 
     wire [1:0] out_rd_dest;
@@ -117,7 +124,7 @@ module mlkem_core (
 
     reg [255:0] mprime;
     reg [8:0] mp_cnt;
-    wire mprime_v = (mp_cnt == 9'd256);
+    wire mprime_v = mp_cnt[8];
 
     // Lane arrays
     wire [95:0] l_pm_rdata [0:8];
@@ -126,30 +133,39 @@ module mlkem_core (
     wire [8:0] l_s_we;
     wire [7:0] l_s_idx [0:8];
     wire [11:0] l_s_data [0:8];
+    wire [8:0] l_s_first;
+    wire [8:0] l_s_last;
     wire [8:0] l_c_rreq;
-    wire [7:0] l_c_ridx [0:8];
-    wire [10:0] l_c_rdata [0:8];
-    wire [5:0] l_c_fill [0:8];
+    wire [4:0] l_c_rblk [0:8];
     wire [8:0] l_c_we;
     wire [7:0] l_c_widx [0:8];
     wire [10:0] l_c_wdata [0:8];
+    wire [8:0] l_c_first;
+    wire [8:0] l_c_last;
+    wire [7:0] l_mu_idx [0:8];
     wire [8:0] l_mp_we;
-    wire [7:0] l_mp_idx [0:8];
-    wire [8:0] l_mp_bit;
     wire [8:0] l_diff;
 
     // Stores
     // Store port selects, registered (constant during a request).
-    reg is_kg, is_enc;
+    reg is_kg;
+    reg is_enc;
     always @(posedge clk) begin
         is_kg <= (op_r == `MLKEM_OP_KEYGEN);
         is_enc <= (op_r == `MLKEM_OP_ENCAPS);
     end
-    wire scrub_mem = (tstate == WAIT) && (sc != 6'd32);
+    // sc counts 0..32 in WAIT only (it is 32 in every other state), so its
+    // top bit alone tells whether the stores are being cleared.
+    wire scrub_mem = !sc[5];
 
+    // Every store has two read ports with their own address: one for the
+    // compute engines (PMAC, lanes), one for the output engine (*_o).
     wire [95:0] s_rd [0:3];
     wire [95:0] t_rd [0:3];
     wire [87:0] c_rd [0:4];
+    wire [95:0] s_rd_o [0:3];
+    wire [95:0] t_rd_o [0:3];
+    wire [87:0] c_rd_o [0:4];
     wire [5:0] s_fill [0:3];
     wire [5:0] t_fill [0:3];
     wire [5:0] c_fill [0:4];
@@ -158,7 +174,7 @@ module mlkem_core (
     generate
         for (g = 0; g < 4; g = g + 1) begin : g_st
             // S: Decaps s^ from the input, KeyGen s^ from vector lane g.
-            wire s_in = st_we && (st_dest == 2'd0) && (st_slot == g);
+            wire s_in = st_we_s[g];
             wire s_ln = l_s_we[g];
             reg [7:0] s_we;
             reg [4:0] s_wa;
@@ -181,29 +197,35 @@ module mlkem_core (
             end
             mlkem_poly_ram #(.W(12), .AW(5)) u_s (
                 .clk(clk), .we(s_we), .waddr({8{s_wa}}), .wdata(s_wd),
-                .raddr(is_kg ? out_rd_blk : pm_s_blk), .rdata(s_rd[g]));
+                .raddr(pm_s_blk), .rdata(s_rd[g]));
+            mlkem_poly_ram #(.W(12), .AW(5)) u_s_o (
+                .clk(clk), .we(s_we), .waddr({8{s_wa}}), .wdata(s_wd),
+                .raddr(out_rd_blk), .rdata(s_rd_o[g]));
             wire s_ep_unused;
             mlkem_slot_state u_s_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first(s_in ? (st_blk == 5'd0) : (s_ln && l_s_idx[g] == 8'd0)),
+                .first(s_in ? st_first : (s_ln && l_s_first[g])),
                 .first_ep(1'b0),
-                .inc(s_in || (s_ln && l_s_idx[g][2:0] == 3'd7)),
+                .inc(s_in || (s_ln && l_s_last[g])),
                 .fill(s_fill[g]), .ep(s_ep_unused));
 
             // T: t^ from the input, or KeyGen t^ from the PMAC (even rows on
             // write port 0, odd rows on port 1).
-            wire t_in = st_we && (st_dest == 2'd1) && (st_slot == g);
-            wire t_pm = (g % 2 == 0) ? (pm_wr0_en && pm_wr_t && (pm_wr0_row == g))
-                                     : (pm_wr1_en && pm_wr_t && (pm_wr1_row == g));
+            wire t_in = st_we_t[g];
+            wire t_pm = pm_wr_t_en[g];
             wire [95:0] t_pm_data = (g % 2 == 0) ? pm_wr0_data : pm_wr1_data;
             wire t_ep_unused;
             mlkem_poly_ram #(.W(12), .AW(5)) u_t (
                 .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
                 .wdata(t_pm ? t_pm_data : st_data),
-                .raddr(is_kg ? out_rd_blk : pm_t_blk), .rdata(t_rd[g]));
+                .raddr(pm_t_blk), .rdata(t_rd[g]));
+            mlkem_poly_ram #(.W(12), .AW(5)) u_t_o (
+                .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
+                .wdata(t_pm ? t_pm_data : st_data),
+                .raddr(out_rd_blk), .rdata(t_rd_o[g]));
             mlkem_slot_state u_t_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first((t_in && st_blk == 5'd0) || (t_pm && pm_wr_blk == 5'd0)),
+                .first((t_in && st_first) || (t_pm && pm_wr_first)),
                 .first_ep(1'b0), .inc(t_in || t_pm),
                 .fill(t_fill[g]), .ep(t_ep_unused));
         end
@@ -211,9 +233,9 @@ module mlkem_core (
         for (g = 0; g < 5; g = g + 1) begin : g_c
             // C: compressed u (slots 0..3) and v (slot 4).
             localparam integer WL = (g < 4) ? 4 + g : 8;
-            wire c_in = st_we && (st_dest == 2'd2) && (st_slot == g);
+            wire c_in = st_we_c[g];
             wire c_ln = l_c_we[WL];
-            wire [7:0] c_ridx = (g < 4) ? (l_c_rreq[WL] ? l_c_ridx[WL] : l_c_ridx[g]) : l_c_ridx[8];
+            wire [4:0] c_rblk = (g < 4) ? (l_c_rreq[WL] ? l_c_rblk[WL] : l_c_rblk[g]) : l_c_rblk[8];
             reg [7:0] c_we;
             reg [4:0] c_wa;
             reg [87:0] c_wd;
@@ -233,27 +255,59 @@ module mlkem_core (
             end
             mlkem_poly_ram #(.W(11), .AW(5)) u_c (
                 .clk(clk), .we(c_we), .waddr({8{c_wa}}), .wdata(c_wd),
-                .raddr(is_enc ? out_rd_blk_c : c_ridx[7:3]), .rdata(c_rd[g]));
+                .raddr(c_rblk), .rdata(c_rd[g]));
+            mlkem_poly_ram #(.W(11), .AW(5)) u_c_o (
+                .clk(clk), .we(c_we), .waddr({8{c_wa}}), .wdata(c_wd),
+                .raddr(out_rd_blk_c), .rdata(c_rd_o[g]));
             wire c_ep_unused;
             mlkem_slot_state u_c_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first(c_in ? (st_blk == 5'd0) : (c_ln && l_c_widx[WL] == 8'd0)),
+                .first(c_in ? st_first : (c_ln && l_c_first[WL])),
                 .first_ep(1'b0),
-                .inc(c_in || (c_ln && l_c_widx[WL][2:0] == 3'd7)),
+                .inc(c_in || (c_ln && l_c_last[WL])),
                 .fill(c_fill[g]), .ep(c_ep_unused));
         end
     endgenerate
 
     // Lanes
+    // Message bit of the coefficient the scalar lane unloads, registered
+    // (the lane sends the index one cycle ahead).
     wire [255:0] mu_bits = is_enc ? seed_a : mprime;
+    reg mu_bit_reg;
+    always @(posedge clk)
+        mu_bit_reg <= mu_bits[l_mu_idx[8]];
     wire [3:0] l_v_ep;
 
     generate
         for (g = 0; g < 9; g = g + 1) begin : g_lane
             localparam integer CS = (g < 4) ? g : ((g < 8) ? g - 4 : 4);
             wire [4:0] pm_rblk = (g < 4) ? pm_v_blk : out_rd_blk_b;
-            wire pm_w0 = pm_wr0_en && !pm_wr_t && (pm_wr0_lane == g);
-            wire pm_w1 = pm_wr1_en && !pm_wr_t && (pm_wr1_lane == g);
+            // PMAC result write: row lanes take one port each (even rows
+            // port 0, odd rows port 1), the scalar lane takes either; the
+            // vector lanes are never written.
+            wire pm_w;
+            wire [95:0] pm_wdata;
+            wire pm_wep;
+            if (g < 4) begin : g_pm_none
+                assign pm_w = 1'b0;
+                assign pm_wdata = 96'd0;
+                assign pm_wep = 1'b0;
+            end else if (g < 8) begin : g_pm_row
+                assign pm_w = pm_wr_lane_en[g];
+                assign pm_wdata = (g % 2 == 0) ? pm_wr0_data : pm_wr1_data;
+                assign pm_wep = 1'b0;
+            end else begin : g_pm_scl
+                assign pm_w = pm_wr_lane_en[8];
+                assign pm_wdata = pm_wr8_p1 ? pm_wr1_data : pm_wr0_data;
+                assign pm_wep = pm_wr8_ep;
+            end
+            // C store block; the scalar lane's bus also carries the message bit.
+            wire [((g == 8) ? 88 : 87):0] c_rbus;
+            if (g == 8) begin : g_mu
+                assign c_rbus = {mu_bit_reg, c_rd[CS]};
+            end else begin : g_no_mu
+                assign c_rbus = c_rd[CS];
+            end
             mlkem_lane #(.LANE(g)) u_lane (
                 .clk(clk),
                 .rst_n(rst_n),
@@ -269,29 +323,31 @@ module mlkem_core (
                 .nz_wdata(nz_wdata),
                 .pm_rd_blk(pm_rblk),
                 .pm_rd_data(l_pm_rdata[g]),
-                .pm_we(pm_w0 || pm_w1),
+                .pm_we(pm_w),
                 .pm_wr_blk(pm_wr_blk),
-                .pm_wr_data(pm_w1 ? pm_wr1_data : pm_wr0_data),
-                .pm_wr_ep(pm_w1 ? pm_wr1_ep : pm_wr0_ep),
+                .pm_wr_first(pm_wr_first),
+                .pm_wr_data(pm_wdata),
+                .pm_wr_ep(pm_wep),
                 .b_fill(l_b_fill[g]),
                 .b_ep(l_b_ep[g]),
                 .s_we(l_s_we[g]),
                 .s_idx(l_s_idx[g]),
                 .s_data(l_s_data[g]),
+                .s_first(l_s_first[g]),
+                .s_last(l_s_last[g]),
                 .c_rreq(l_c_rreq[g]),
-                .c_ridx(l_c_ridx[g]),
-                .c_rdata(l_c_rdata[g]),
+                .c_rblk(l_c_rblk[g]),
+                .c_rdata(c_rbus),
                 .c_fill(c_fill[CS]),
                 .c_we(l_c_we[g]),
                 .c_widx(l_c_widx[g]),
                 .c_wdata(l_c_wdata[g]),
-                .mu_bits(mu_bits),
+                .c_first(l_c_first[g]),
+                .c_last(l_c_last[g]),
+                .mu_idx(l_mu_idx[g]),
                 .mp_we(l_mp_we[g]),
-                .mp_idx(l_mp_idx[g]),
-                .mp_bit(l_mp_bit[g]),
                 .diff(l_diff[g])
             );
-            assign l_c_rdata[g] = c_rd[CS][11*l_c_ridx[g][2:0] +: 11];
         end
     endgenerate
 
@@ -301,12 +357,12 @@ module mlkem_core (
     mlkem_in u_in (
         .clk(clk), .rst_n(rst_n), .kill(kill), .go(go), .scrub(scrub_r),
         .op(op_r), .k(k_r), .busy(in_busy),
-        .s_tdata(s_axis_tdata), .s_tkeep(s_axis_tkeep), .s_tlast(s_axis_tlast),
-        .s_tvalid(s_axis_tvalid), .s_tready(s_axis_tready),
+        .s_tdata(in_data), .s_tvalid(in_valid), .s_tready(in_ready),
         .fifo_push(fifo_push_in), .fifo_din(fifo_din_in), .fifo_full(fifo_full),
-        .st_we(st_we), .st_dest(st_dest), .st_slot(st_slot), .st_blk(st_blk), .st_data(st_data),
+        .st_we_s(st_we_s), .st_we_t(st_we_t), .st_we_c(st_we_c),
+        .st_blk(st_blk), .st_first(st_first), .st_data(st_data),
         .rho(in_rho), .rho_v(in_rho_v), .h(in_h), .h_v(in_h_v), .z(in_z), .z_v(in_z_v),
-        .err(in_err), .err_code(in_err_code)
+        .err(in_err)
     );
 
     mlkem_fifo #(.W(64), .AW(8)) u_fifo (
@@ -354,10 +410,8 @@ module mlkem_core (
         .t_fill({t_fill[3], t_fill[2], t_fill[1], t_fill[0]}),
         .v_slot(pm_v_slot), .v_blk(pm_v_blk), .v_rdata(l_pm_rdata[pm_v_slot]),
         .v_fill({l_b_fill[3], l_b_fill[2], l_b_fill[1], l_b_fill[0]}), .v_ep(l_v_ep),
-        .wr0_en(pm_wr0_en), .wr1_en(pm_wr1_en), .wr_t(pm_wr_t),
-        .wr0_row(pm_wr0_row), .wr1_row(pm_wr1_row),
-        .wr0_lane(pm_wr0_lane), .wr1_lane(pm_wr1_lane), .wr_blk(pm_wr_blk),
-        .wr0_data(pm_wr0_data), .wr1_data(pm_wr1_data), .wr0_ep(pm_wr0_ep), .wr1_ep(pm_wr1_ep)
+        .wr_t_en(pm_wr_t_en), .wr_lane_en(pm_wr_lane_en), .wr8_p1(pm_wr8_p1), .wr8_ep(pm_wr8_ep),
+        .wr_blk(pm_wr_blk), .wr_first(pm_wr_first), .wr0_data(pm_wr0_data), .wr1_data(pm_wr1_data)
     );
 
     // Output
@@ -367,19 +421,12 @@ module mlkem_core (
         lanes_idle <= (lane_busy == 9'd0);
     wire fin_v = (op_r == `MLKEM_OP_DECAPS) && computed && kbar_v && kk_v;
     wire [255:0] k_final = diff_any ? kbar : kk;
-    reg [95:0] out_rd_data;
     reg [5:0] out_rd_fill;
-    integer obi;
     always @(*) begin
         case (out_rd_dest)
-            2'd0: begin out_rd_data = s_rd[out_rd_slot[1:0]]; out_rd_fill = s_fill[out_rd_slot[1:0]]; end
-            2'd1: begin out_rd_data = t_rd[out_rd_slot[1:0]]; out_rd_fill = t_fill[out_rd_slot[1:0]]; end
-            default: begin
-                out_rd_data = 96'd0;
-                for (obi = 0; obi < 8; obi = obi + 1)
-                    out_rd_data[12*obi +: 11] = c_rd[out_rd_slot][11*obi +: 11];
-                out_rd_fill = c_fill[out_rd_slot];
-            end
+            2'd0: out_rd_fill = s_fill[out_rd_slot[1:0]];
+            2'd1: out_rd_fill = t_fill[out_rd_slot[1:0]];
+            default: out_rd_fill = c_fill[out_rd_slot];
         endcase
     end
 
@@ -388,16 +435,32 @@ module mlkem_core (
         .op(op_r), .k(k_r), .busy(out_busy), .secrets_read(out_secrets_read),
         .rd_dest(out_rd_dest), .rd_slot(out_rd_slot), .rd_blk(out_rd_blk),
         .rd_blk_c(out_rd_blk_c), .rd_blk_b(out_rd_blk_b),
-        .rd_data(out_rd_data), .rd_fill(out_rd_fill),
+        .rd_s_data(s_rd_o[out_rd_slot[1:0]]), .rd_t_data(t_rd_o[out_rd_slot[1:0]]),
+        .rd_c_data(c_rd_o[out_rd_slot]), .rd_fill(out_rd_fill),
         .bias_data(l_pm_rdata[4 + out_rd_slot[1:0]]),
         .bias_fill(l_b_fill[4 + out_rd_slot[1:0]]),
         .bias_ep(l_b_ep[4 + out_rd_slot[1:0]]),
         .rho(rho), .rho_v(rho_v), .h(h), .h_v(h_v), .z(seed_z),
         .key(is_enc ? kk : k_final), .key_v(is_enc ? kk_v : fin_v),
         .fifo_push(fifo_push_out), .fifo_din(fifo_din_out), .fifo_full(fifo_full),
-        .m_tdata(m_axis_tdata), .m_tkeep(m_axis_tkeep), .m_tlast(m_axis_tlast),
-        .m_tvalid(m_axis_tvalid), .m_tready(m_axis_tready)
+        .m_tdata(out_data), .m_tvalid(out_valid), .m_tready(out_ready)
     );
+
+    // Seed words: written while ready, cleared with DONE and by seed_clr
+    integer sw;
+    always @(posedge clk) begin
+        if (seed_clr || tstate == DONE) begin
+            seed_a <= 256'd0;
+            seed_z <= 256'd0;
+        end else begin
+            for (sw = 0; sw < 8; sw = sw + 1) begin
+                if (seed_we[sw])
+                    seed_a[32*sw +: 32] <= seed_wdata;
+                if (seed_we[8+sw])
+                    seed_z[32*sw +: 32] <= seed_wdata;
+            end
+        end
+    end
 
     // M' register
     always @(posedge clk) begin
@@ -405,7 +468,7 @@ module mlkem_core (
             mprime <= 256'd0;
             mp_cnt <= 9'd0;
         end else if (l_mp_we[8]) begin
-            mprime[l_mp_idx[8]] <= l_mp_bit[8];
+            mprime[l_c_widx[8]] <= l_c_wdata[8][0];
             mp_cnt <= mp_cnt + 9'd1;
         end
     end
@@ -424,6 +487,7 @@ module mlkem_core (
             tstate <= WAIT;
             boot <= 1'b1;
             go <= 1'b0;
+            launch <= 1'b0;
             kill <= 1'b1;
             scrub <= 1'b0;
             scrub_r <= 1'b0;
@@ -450,7 +514,13 @@ module mlkem_core (
                     started <= 1'b0;
                     computed <= 1'b0;
                     run_age <= 2'd0;
-                    if (start) begin
+                    // The request parameters are latched one cycle before go,
+                    // so the engines can decode them into registers.
+                    if (launch) begin
+                        launch <= 1'b0;
+                        go <= 1'b1;
+                        tstate <= RUN;
+                    end else if (start) begin
                         fail <= 1'b0;
                         fail_code <= `MLKEM_ERR_NONE;
                         if (op == 2'd3 || pset == 2'd3) begin
@@ -460,10 +530,7 @@ module mlkem_core (
                         end else begin
                             op_r <= op;
                             k_r <= mlkem_k(pset);
-                            seed_a <= seed[255:0];
-                            seed_z <= seed[511:256];
-                            go <= 1'b1;
-                            tstate <= RUN;
+                            launch <= 1'b1;
                         end
                     end
                 end
@@ -476,7 +543,7 @@ module mlkem_core (
                         computed <= 1'b1;
                     if (abort || run_err) begin
                         fail <= 1'b1;
-                        fail_code <= abort ? `MLKEM_ERR_ABORT : (in_err ? in_err_code : `MLKEM_ERR_KEY);
+                        fail_code <= abort ? `MLKEM_ERR_ABORT : `MLKEM_ERR_KEY;
                         kill <= 1'b1;
                         tstate <= WAIT;
                     end else if (compute_idle && out_secrets_read) begin
@@ -506,8 +573,6 @@ module mlkem_core (
                     error <= fail && !boot;
                     if (!boot)
                         err_code <= fail_code;
-                    seed_a <= 256'd0;
-                    seed_z <= 256'd0;
                     tstate <= IDLE;
                 end
                 default: tstate <= IDLE;
