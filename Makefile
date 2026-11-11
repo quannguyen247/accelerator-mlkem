@@ -3,7 +3,7 @@ N ?= 1
 STALL ?= 30
 SEED ?= 1
 VIVADO_HOME ?=
-PART ?= xck26-sfvc784-2LV-c
+PART ?= xc7a200tfbg676-3
 VIVADO := $(if $(VIVADO_HOME),$(VIVADO_HOME)/bin/,)vivado
 
 BUILD := build
@@ -17,7 +17,7 @@ RTL := $(wildcard rtl/modules/*/*.v rtl/modules/*/*/*.v)
 vectors:
 	$(PYTHON) $(VEC)/mlkem_gen.py $(N)
 
-# QuestaSim regression with random stream stalls
+# QuestaSim regression of mlkem_core with random request/result port stalls
 test: vectors
 	mkdir -p $(BUILD)
 	cd $(BUILD) && vlib work > /dev/null && \
@@ -26,7 +26,7 @@ test: vectors
 		-do "run -all; quit -f" | tee sim.log
 	grep -Fq '*** ALL TESTS PASSED ***' $(BUILD)/sim.log
 
-# Always-ready streams: cycle counts per operation
+# Always-ready request/result ports: cycle counts per operation
 perf: vectors
 	mkdir -p $(BUILD)
 	cd $(BUILD) && vlib work > /dev/null && \
@@ -43,13 +43,15 @@ trace: vectors
 	vsim -c -quiet tb_mlkem_core tb_mlkem_trace +VEC=../$(VEC) +PERF +TRACE \
 		-do "run -all; quit -f" | tee trace.log
 
-# AXI4 register slave + AXI4-Stream IP top (SPEC section 4)
+# IP top (SPEC section 4): AXI4-Lite registers + AXI4 request/result buffer,
+# random VALID/READY stalls on the AXI4 master
 test-axi: vectors
 	mkdir -p $(BUILD)
 	cd $(BUILD) && vlib work > /dev/null && \
 	vlog -quiet -sv $(addprefix +incdir+../,$(INC)) $(addprefix ../,$(RTL)) \
 		../testbench/tb_mlkem_axi.sv && \
-	vsim -c -quiet tb_mlkem_axi +VEC=../$(VEC) -do "run -all; quit -f" | tee sim_axi.log
+	vsim -c -quiet tb_mlkem_axi +VEC=../$(VEC) +STALL=$(STALL) +SEED=$(SEED) \
+		-do "run -all; quit -f" | tee sim_axi.log
 	grep -Fq '*** ALL TESTS PASSED ***' $(BUILD)/sim_axi.log
 
 sim-iverilog: vectors

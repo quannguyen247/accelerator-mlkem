@@ -47,12 +47,11 @@ proc finish_core {core name} {
     puts "Packaged IP: $ip_dir"
 }
 
-# ML-KEM accelerator: one clock for the register slave and both streams; active-low reset.
+# ML-KEM accelerator: one clock for both slaves; active-low reset.
 set core [package_core mlkem_core mlkem_axi $rtl_files {ML-KEM accelerator core} \
-    {FIPS 203 ML-KEM-512/768/1024 KeyGen, Encaps and Decaps. AXI4-Lite CSR, AXI4-Stream request and result packets, interrupt.}]
+    {FIPS 203 ML-KEM-512/768/1024 KeyGen, Encaps and Decaps. AXI4-Lite CSR (s_axil), AXI4 slave on the 4736-byte request/result buffer (s_axi), interrupt.}]
+ipx::associate_bus_interfaces -busif s_axil -clock aclk $core
 ipx::associate_bus_interfaces -busif s_axi -clock aclk $core
-ipx::associate_bus_interfaces -busif s_axis -clock aclk $core
-ipx::associate_bus_interfaces -busif m_axis -clock aclk $core
 if {[llength [ipx::get_bus_interfaces irq -of_objects $core]] == 0} {
     ipx::infer_bus_interface irq xilinx.com:signal:interrupt_rtl:1.0 $core
 }

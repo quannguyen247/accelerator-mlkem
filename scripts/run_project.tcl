@@ -14,9 +14,9 @@ wait_on_run synth_1
 if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} { error "synth_1 failed" }
 
 open_run synth_1 -name synth_1
-set n_bram [llength [get_cells -hier -filter {REF_NAME =~ RAMB* || REF_NAME =~ FIFO*}]]
-set n_uram [llength [get_cells -hier -filter {REF_NAME =~ URAM*}]]
-set n_dsp  [llength [get_cells -hier -filter {REF_NAME =~ DSP*}]]
+set n_bram [llength [get_cells -quiet -hier -filter {REF_NAME =~ RAMB* || REF_NAME =~ FIFO*}]]
+set n_uram [llength [get_cells -quiet -hier -filter {REF_NAME =~ URAM*}]]
+set n_dsp  [llength [get_cells -quiet -hier -filter {REF_NAME =~ DSP*}]]
 puts "MLKEM_SYNTH block RAM = $n_bram, UltraRAM = $n_uram, DSP = $n_dsp"
 close_design
 if {$n_bram + $n_uram + $n_dsp != 0} { error "hard macros inferred; implementation not started" }
