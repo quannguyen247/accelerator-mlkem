@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "mlkem_defs.vh"
 
-// Hash engine: runs the per-operation job list on one keccak_top.
+// Hash engine: runs the per-operation job list on one keccak_sponge.
 //   KeyGen: G(d||k), PRF(sigma,0..2k-1), XOF x k^2, H(ek), WIPE
 //   Encaps: H(ek), G(m||h), PRF(r,0..k-1), XOF x k^2, PRF(r,k..2k), WIPE
 //   Decaps: H(ek), XOF x k^2, G(m'||h), PRF(r',0..2k), J(z||c), WIPE
@@ -11,6 +11,8 @@
 // the block that completes a matrix polynomial is identified before its
 // handshake, so no permutation is wasted. WIPE overwrites the Keccak input
 // registers at the end of the request.
+// The engine pads the block while it assembles it (FIPS 202 suffix byte and
+// final bit), so the sponge absorbs the block register directly.
 module mlkem_hash (
     input wire clk,
     input wire rst_n,
@@ -134,21 +136,34 @@ module mlkem_hash (
         end
     endfunction
 
+    // The job of the next phase is decoded one cycle ahead (job_inc): ph
+    // never steps in two consecutive cycles (WAIT and FIN are followed by
+    // NEXT), so a phase step only loads a register.
     reg [2:0] jtype;
     reg [4:0] jcount;
+    reg [7:0] job_inc;
     wire k_done;
+    wire job_first_go = (curr_state == ST_IDLE) && go;
     wire ph_inc = ((curr_state == ST_WAIT) && k_done && (cnt + 5'd1 == jcount)) || (curr_state == ST_FIN);
-    wire [2:0] ph_nx = (curr_state == ST_IDLE && go) ? 3'd0 : ph_inc ? ph + 3'd1 : ph;
-    wire [7:0] job_nx = job_of(op, ph_nx, k);
+    wire [2:0] ph_nx = job_first_go ? 3'd0 : ph_inc ? ph + 3'd1 : ph;
+    wire [7:0] job_first = job_of(op, 3'd0, k);
     always @(posedge clk) begin
-        jtype <= job_nx[7:5];
-        jcount <= job_nx[4:0];
+        job_inc <= job_of(op, ph + 3'd1, k);
+        if (job_first_go)
+            {jtype, jcount} <= job_first;
+        else if (ph_inc)
+            {jtype, jcount} <= job_inc;
     end
 
-    wire [1:0] eta = ((op == `MLKEM_OP_KEYGEN) || (n_prf < {1'b0, k})) ? mlkem_eta1(k) : 2'd2;
-    wire eta3 = (eta == 2'd3);
-    wire [3:0] prf_lane = (n_prf < {1'b0, k}) ? n_prf :
-                          (n_prf < {k, 1'b0}) ? n_prf - {1'b0, k} + 4'd4 : 4'd8;
+    // eta and the destination lane of PRF number n_prf, registered: n_prf
+    // changes only between jobs.
+    reg eta3;
+    reg [3:0] prf_lane;
+    always @(posedge clk) begin
+        eta3 <= ((op == `MLKEM_OP_KEYGEN) || (n_prf < {1'b0, k})) && (mlkem_eta1(k) == 2'd3);
+        prf_lane <= (n_prf < {1'b0, k}) ? n_prf :
+                    (n_prf < {k, 1'b0}) ? n_prf - {1'b0, k} + 4'd4 : 4'd8;
+    end
     wire [3:0] du = mlkem_du(k);
     wire [3:0] dv = mlkem_dv(k);
     // Message words: H(ek) = 48k + 4, J(z||c) = 4 + 4(du*k + dv)
@@ -171,25 +186,27 @@ module mlkem_hash (
         endcase
     end
 
-    // Short single-block inputs
+    // Short single-block inputs, padded: the suffix byte follows the message
+    // and the final bit closes the rate (72, 136 or 168 bytes). The long
+    // jobs and WIPE start from a zero block.
     reg [1343:0] sblk;
-    reg [7:0] slen;
     always @(*) begin
         sblk = 1344'd0;
-        slen = 8'd0;
         case (jtype)
             J_G: begin
                 if (op == `MLKEM_OP_KEYGEN) begin
                     sblk[263:0] = {5'd0, k, seed_d};
-                    slen = 8'd33;
+                    sblk[271:264] = `MLKEM_PAD_SHA3;
                 end else begin
                     sblk[511:0] = (op == `MLKEM_OP_ENCAPS) ? {h, seed_m} : {h_in, mprime};
-                    slen = 8'd64;
+                    sblk[519:512] = `MLKEM_PAD_SHA3;
                 end
+                sblk[575] = 1'b1;
             end
             J_PRF: begin
                 sblk[263:0] = {4'd0, n_prf, pseed};
-                slen = 8'd33;
+                sblk[271:264] = `MLKEM_PAD_SHAKE;
+                sblk[1087] = 1'b1;
             end
             J_XOF: begin
                 // KeyGen A[r][j] = SampleNTT(rho||j||r); encryption uses the transpose.
@@ -197,12 +214,10 @@ module mlkem_hash (
                     sblk[271:0] = {6'd0, xr, 6'd0, xj, rho};
                 else
                     sblk[271:0] = {6'd0, xj, 6'd0, xr, rho};
-                slen = 8'd34;
+                sblk[279:272] = `MLKEM_PAD_SHAKE;
+                sblk[1343] = 1'b1;
             end
-            default: begin
-                sblk = 1344'd0;
-                slen = 8'd0;
-            end
+            default: sblk = 1344'd0;
         endcase
     end
 
@@ -215,7 +230,6 @@ module mlkem_hash (
     reg absorb_valid;
     reg absorb_last;
     reg [1343:0] msg_block;
-    reg [7:0] msg_len;
     wire absorb_ready;
     wire squeeze_valid;
     wire [1343:0] squeeze_out;
@@ -228,20 +242,33 @@ module mlkem_hash (
 
     // Squeeze handshake, decided in the cycle the block appears.
     wire [6:0] pc;
-    reg [1:0] sv_age;
+    reg [2:0] sv_age;               // cycles the block has waited (saturates at 4)
     reg [1:0] sq_blk;
     reg xof_first;
     reg xof_new_q;
     reg sq_cap;
-    wire [9:0] cnt_eff = xof_first ? 10'd0 : {1'b0, smp_count};
-    wire xof_sure_more = (cnt_eff + 10'd112 < 10'd256);
-    wire xof_last = (cnt_eff + {3'd0, pc} >= 10'd256);
+    // Coefficients still needed by the polynomial (256 - count) and whether
+    // a block certainly cannot complete it (fewer than 112 + count), both
+    // registered: the count is final while the sampler is idle, which every
+    // XOF squeeze waits for.
+    wire [8:0] cnt_eff = xof_first ? 9'd0 : smp_count;
+    reg [8:0] xof_rem;
+    reg xof_sure_more;
+    always @(posedge clk) begin
+        xof_rem <= 9'd256 - cnt_eff;
+        xof_sure_more <= (cnt_eff < 9'd144);
+    end
+    // The precount is valid from the third waiting cycle; its compare with
+    // rem is registered, so an uncertain block is decided in the fourth.
+    reg xof_last;
+    always @(posedge clk)
+        xof_last <= ({2'd0, pc} >= xof_rem);
     reg sq_ok;
     always @(*) begin
         case (jtype)
             J_H: sq_ok = (op != `MLKEM_OP_DECAPS) || h_in_v;
             J_PRF: sq_ok = !nw_busy && !smp_busy;
-            J_XOF: sq_ok = !smp_busy && !nw_busy && (xof_sure_more || sv_age == 2'd3);
+            J_XOF: sq_ok = !smp_busy && !nw_busy && (xof_sure_more || sv_age == 3'd4);
             default: sq_ok = 1'b1;
         endcase
     end
@@ -255,14 +282,19 @@ module mlkem_hash (
     wire sq_end = (jtype == J_XOF) ? xof_end : !((jtype == J_PRF) && eta3 && sq_blk == 2'd0);
     wire squeeze_last = sq_end;
 
-    keccak_top u_keccak (
+    // Keccak reset, registered: kill and the WIPE reset reach the 1600-bit
+    // state one cycle later (no permutation is started in that cycle).
+    reg k_rst_n;
+    always @(posedge clk)
+        k_rst_n <= rst_n && !kill && !k_rst;
+
+    keccak_sponge u_keccak (
         .clk(clk),
-        .rst_n(rst_n && !kill && !k_rst),
+        .rst_n(k_rst_n),
         .mode(kmode),
         .absorb_valid(absorb_valid),
         .absorb_last(absorb_last),
-        .msg_block_in(msg_block),
-        .msg_len_bytes(msg_len),
+        .absorb_in(msg_block),
         .absorb_ready(absorb_ready),
         .squeeze_ready(squeeze_ready),
         .squeeze_last(squeeze_last),
@@ -285,13 +317,26 @@ module mlkem_hash (
     wire want_word = (curr_state == ST_ABS) && is_long && !blk_full && words_left;
     assign fifo_pop = want_word && !use_z && !fifo_empty;
     wire got_word = want_word && (use_z || !fifo_empty);
-    wire [63:0] word_in = use_z ? z_in[tc[1:0]*64 +: 64] : fifo_data;
+    wire [63:0] word_in = use_z ? z_in[{tc[1:0], 6'd0} +: 64] : fifo_data;
     // A taken word waits one cycle in a register before it lands in the
     // block, so the FIFO read drives 64 flip-flops instead of the whole block.
     // The block is complete in the cycle absorb_valid rises (no extra latency).
-    reg word_valid_reg;
-    reg [4:0] word_idx_reg;
     reg [63:0] word_reg;
+
+    // Keccak input block: every 64-bit word has its own registered strobes.
+    //   blk_ld_reg    load the word: the short block (zero for long jobs and
+    //                 WIPE) or, with blk_word_reg, the message word
+    //   blk_pad_reg   suffix byte in the word after the last message word
+    //   pad_last_reg  final bit of the rate (long jobs use 136 bytes)
+    // A long block is zeroed when its job starts and after every absorb, so
+    // the words behind the suffix stay zero. The word counts of H(ek) and
+    // J(z||c) are never a multiple of 17, so the last block always has room
+    // for the suffix.
+    reg [20:0] blk_ld_reg;
+    reg [20:0] blk_word_reg;
+    reg [20:0] blk_pad_reg;
+    reg pad_last_reg;
+    wire [7:0] pad_suffix = (jtype == J_J) ? `MLKEM_PAD_SHAKE : `MLKEM_PAD_SHA3;
 
     // H(ek) check in two stages: four 64-bit compares, then the verdict
     reg h_chk_reg;
@@ -305,6 +350,35 @@ module mlkem_hash (
 
     // Hash FSM next state
     wire absorb_fire = absorb_valid && absorb_ready;
+    wire blk_clear = ((curr_state == ST_NEXT) && (job_go || wipe_go)) ||
+                     ((curr_state == ST_ABS) && is_long && absorb_fire);
+
+    integer w;
+    always @(posedge clk) begin
+        if (!rst_n || kill) begin
+            blk_ld_reg <= 21'd0;
+            blk_word_reg <= 21'd0;
+            blk_pad_reg <= 21'd0;
+            pad_last_reg <= 1'b0;
+        end else begin
+            for (w = 0; w < 21; w = w + 1) begin
+                blk_ld_reg[w] <= blk_clear || (got_word && (wc == w));
+                blk_word_reg[w] <= got_word && (wc == w);
+                blk_pad_reg[w] <= got_word && (rem == 9'd1) && (wc + 5'd1 == w);
+            end
+            pad_last_reg <= got_word && (rem == 9'd1);
+        end
+        for (w = 0; w < 21; w = w + 1) begin
+            if (blk_ld_reg[w])
+                msg_block[64*w +: 64] <= blk_word_reg[w] ? word_reg : sblk[64*w +: 64];
+            if (blk_pad_reg[w])
+                msg_block[64*w +: 8] <= pad_suffix;
+        end
+        if (pad_last_reg)
+            msg_block[1087] <= 1'b1;
+        if (scrub)
+            msg_block <= 1344'd0;
+    end
 
     always @(*) begin
         next_state = curr_state;
@@ -356,15 +430,13 @@ module mlkem_hash (
             hfail <= 1'b0;
             h_chk_reg <= 1'b0;
             blk_full <= 1'b0;
-            word_valid_reg <= 1'b0;
-            sv_age <= 2'd0;
+            sv_age <= 3'd0;
         end else begin
             curr_state <= next_state;
             k_rst <= 1'b0;
             k_start <= 1'b0;
             smp_load <= 1'b0;
             nz_we <= 1'b0;
-            word_valid_reg <= 1'b0;
             h_chk_reg <= 1'b0;
             if (h_chk_reg)
                 hfail <= (h_ne_reg != 4'd0);
@@ -428,16 +500,16 @@ module mlkem_hash (
                 nz_we <= 1'b1;
                 nz_lane <= nw_lane;
                 nz_addr <= nw_base + nw_cnt;
-                nz_wdata <= cap[nw_cnt*64 +: 64];
+                nz_wdata <= cap[{nw_cnt, 6'd0} +: 64];
                 nw_cnt <= nw_cnt + 5'd1;
                 if (nw_cnt + 5'd1 == nw_left)
                     nw_busy <= 1'b0;
             end
 
             if (!squeeze_valid || sq_fire || curr_state != ST_SQZ)
-                sv_age <= 2'd0;
-            else if (sv_age != 2'd3)
-                sv_age <= sv_age + 2'd1;
+                sv_age <= 3'd0;
+            else if (sv_age != 3'd4)
+                sv_age <= sv_age + 3'd1;
 
             case (curr_state)
                 ST_IDLE: begin
@@ -471,8 +543,6 @@ module mlkem_hash (
                     if (!is_long) begin
                         absorb_valid <= 1'b1;
                         absorb_last <= 1'b1;
-                        msg_block <= sblk;
-                        msg_len <= slen;
                     end
                 end
                 ST_ABS: begin
@@ -481,8 +551,6 @@ module mlkem_hash (
                             absorb_valid <= 1'b0;
                     end else begin
                         if (got_word) begin
-                            word_valid_reg <= 1'b1;
-                            word_idx_reg <= wc;
                             word_reg <= word_in;
                             wc <= wc + 5'd1;
                             if (!tc[2])
@@ -491,12 +559,9 @@ module mlkem_hash (
                             if (wc == 5'd16 || rem == 9'd1)
                                 blk_full <= 1'b1;
                         end
-                        if (word_valid_reg)
-                            msg_block[word_idx_reg*64 +: 64] <= word_reg;
                         if (blk_full && !absorb_valid) begin
                             absorb_valid <= 1'b1;
                             absorb_last <= !words_left;
-                            msg_len <= {wc, 3'd0};
                         end
                         if (absorb_valid && absorb_ready) begin
                             absorb_valid <= 1'b0;
@@ -533,14 +598,12 @@ module mlkem_hash (
                     end
                 end
                 ST_WIPE: begin
-                    // Absorb an empty SHAKE128 message to overwrite the input
-                    // registers, then reset the permutation before it runs out.
+                    // Absorb a zero block to overwrite the input registers,
+                    // then reset the permutation before it runs out.
                     cnt <= cnt + 5'd1;
                     if (cnt == 5'd0) begin
                         absorb_valid <= 1'b1;
                         absorb_last <= 1'b1;
-                        msg_block <= 1344'd0;
-                        msg_len <= 8'd0;
                     end
                     if (absorb_valid && absorb_ready)
                         absorb_valid <= 1'b0;
@@ -558,8 +621,8 @@ module mlkem_hash (
                 kk <= 256'd0;
                 kbar <= 256'd0;
                 cap <= 1344'd0;
-                msg_block <= 1344'd0;
                 word_reg <= 64'd0;
+                nz_wdata <= 64'd0;
                 kk_v <= 1'b0;
                 kbar_v <= 1'b0;
             end

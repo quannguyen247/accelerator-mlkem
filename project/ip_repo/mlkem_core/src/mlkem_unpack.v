@@ -81,13 +81,13 @@ module mlkem_unpack (
         end
     end
 
-    // Block fields widened to 12 bits
+    // Block fields widened to 12 bits; d = 8 (byte strings) passes the raw block
     integer i;
     always @(*) begin
         out_vals = 96'd0;
         for (i = 0; i < 8; i = i + 1) begin
             case (db)
-                4'd12: out_vals[12*i +: 12] = out_raw[12*i +: 12];
+                4'd12, 4'd8: out_vals[12*i +: 12] = out_raw[12*i +: 12];
                 4'd11: out_vals[12*i +: 12] = {1'b0, out_raw[11*i +: 11]};
                 4'd10: out_vals[12*i +: 12] = {2'b0, out_raw[10*i +: 10]};
                 4'd5:  out_vals[12*i +: 12] = {7'b0, out_raw[5*i +: 5]};

@@ -6,6 +6,10 @@ module keccak_permutation (
     input wire rst_n,
     input wire clear,
     input wire in_valid,
+    // Lanes of xor_in XORed into the state with in_valid. The enable acts on
+    // the register enables, so a state bit's input is the round output or
+    // the bit XOR its block bit, nothing else.
+    input wire [`KECCAK_NUM_LANES-1:0] xor_lane_en,
     input wire [`KECCAK_STATE_WIDTH-1:0] xor_in,
     output wire last_round,
     output reg [`KECCAK_STATE_WIDTH-1:0] state_out
@@ -45,6 +49,7 @@ module keccak_permutation (
         endcase
     end
 
+    integer l;
     always @(posedge clk) begin
         if (!rst_n) begin
             curr_state <= ST_IDLE;
@@ -54,7 +59,9 @@ module keccak_permutation (
             case (curr_state)
                 ST_IDLE: begin
                     if (in_valid) begin
-                        state_out <= state_out ^ xor_in;
+                        for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1)
+                            if (xor_lane_en[l])
+                                state_out[64*l +: 64] <= state_out[64*l +: 64] ^ xor_in[64*l +: 64];
                         round_ctr <= 5'd0;
                     end else if (clear) begin
                         state_out <= {`KECCAK_STATE_WIDTH{1'b0}};

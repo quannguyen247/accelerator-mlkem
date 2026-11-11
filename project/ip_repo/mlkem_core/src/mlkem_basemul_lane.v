@@ -35,10 +35,13 @@ module mlkem_basemul_lane (
     (* keep = "true" *) reg [12:0] sa_reg, sb_reg;
     reg [11:0] g_reg;
 
-    // Stage 3: products
+    // Stage 3: products (stage 4 for the 13-bit Karatsuba product, a
+    // three-stage multiplier). Of (a0 + a1)(b0 + b1) only the low 25 bits
+    // are kept: c1 = a0*b1 + a1*b0 < 2^25, so the subtraction below is exact
+    // modulo 2^25.
     wire [23:0] m00;
     wire [23:0] m11;
-    wire [25:0] mk;
+    wire [24:0] mk;
 
     // Stage 9: a1*b1*gamma and the aligned products
     wire [11:0] t7;
@@ -46,7 +49,7 @@ module mlkem_basemul_lane (
     wire [23:0] z9;
     wire [23:0] m00_9;
     wire [23:0] m11_9;
-    wire [25:0] mk_9;
+    wire [24:0] mk_9;
 
     // Stage 10: one term of each sum
     reg [24:0] c0_reg;
@@ -71,7 +74,7 @@ module mlkem_basemul_lane (
 
     mlkem_mul #(.WA(12), .WB(12)) u_m00 (.clk(clk), .a(a0_reg), .b(b0_reg), .p(m00));
     mlkem_mul #(.WA(12), .WB(12)) u_m11 (.clk(clk), .a(a1_reg), .b(b1_reg), .p(m11));
-    mlkem_mul #(.WA(13), .WB(13)) u_mk  (.clk(clk), .a(sa_reg), .b(sb_reg), .p(mk));
+    mlkem_mul #(.WA(13), .WB(13), .WP(25), .STAGES(3)) u_mk (.clk(clk), .a(sa_reg), .b(sb_reg), .p(mk));
 
     mlkem_montred u_red_m11 (.clk(clk), .t({4'd0, m11}), .r(t7));
     mlkem_delay #(.W(12), .D(6)) u_dg (.clk(clk), .d(g_reg), .q(g7));
@@ -79,7 +82,7 @@ module mlkem_basemul_lane (
 
     mlkem_delay #(.W(24), .D(6)) u_d00 (.clk(clk), .d(m00), .q(m00_9));
     mlkem_delay #(.W(24), .D(6)) u_d11 (.clk(clk), .d(m11), .q(m11_9));
-    mlkem_delay #(.W(26), .D(6)) u_dk  (.clk(clk), .d(mk), .q(mk_9));
+    mlkem_delay #(.W(25), .D(5)) u_dk  (.clk(clk), .d(mk), .q(mk_9));
 
     mlkem_montred u_red0 (.clk(clk), .t(sum0_reg), .r(r0));
     mlkem_montred u_red1 (.clk(clk), .t(sum1_reg), .r(r1));
@@ -94,7 +97,7 @@ module mlkem_basemul_lane (
         sa_reg <= a0 + a1;
         sb_reg <= b0 + b1;
         c0_reg <= {1'b0, m00_9} + {1'b0, z9};
-        c1_reg <= mk_9 - {2'b0, m00_9} - {2'b0, m11_9};
+        c1_reg <= mk_9 - {1'b0, m00_9} - {1'b0, m11_9};
     end
 
     // Flag pipeline update

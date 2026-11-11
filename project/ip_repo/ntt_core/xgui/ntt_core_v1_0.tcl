@@ -4,6 +4,7 @@ proc init_gui { IPINST } {
   #Adding Page
   set Page_0 [ipgui::add_page $IPINST -name "Page 0"]
   ipgui::add_param $IPINST -name "INTT_SCALE" -parent ${Page_0}
+  ipgui::add_param $IPINST -name "PORT_REG" -parent ${Page_0}
 
 
 }
@@ -17,9 +18,23 @@ proc validate_PARAM_VALUE.INTT_SCALE { PARAM_VALUE.INTT_SCALE } {
 	return true
 }
 
+proc update_PARAM_VALUE.PORT_REG { PARAM_VALUE.PORT_REG } {
+	# Procedure called to update PORT_REG when any of the dependent parameters in the arguments change
+}
+
+proc validate_PARAM_VALUE.PORT_REG { PARAM_VALUE.PORT_REG } {
+	# Procedure called to validate PORT_REG
+	return true
+}
+
 
 proc update_MODELPARAM_VALUE.INTT_SCALE { MODELPARAM_VALUE.INTT_SCALE PARAM_VALUE.INTT_SCALE } {
 	# Procedure called to set VHDL generic/Verilog parameter value(s) based on TCL parameter value
 	set_property value [get_property value ${PARAM_VALUE.INTT_SCALE}] ${MODELPARAM_VALUE.INTT_SCALE}
+}
+
+proc update_MODELPARAM_VALUE.PORT_REG { MODELPARAM_VALUE.PORT_REG PARAM_VALUE.PORT_REG } {
+	# Procedure called to set VHDL generic/Verilog parameter value(s) based on TCL parameter value
+	set_property value [get_property value ${PARAM_VALUE.PORT_REG}] ${MODELPARAM_VALUE.PORT_REG}
 }
 

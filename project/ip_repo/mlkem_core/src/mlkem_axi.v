@@ -1,175 +1,207 @@
 `timescale 1ns / 1ps
 `include "mlkem_defs.vh"
 
-// ML-KEM IP top for SoC integration (SPEC section 4): AXI4-Lite register slave,
-// AXI4-Stream request/result packets for the DMA, and a level interrupt.
+// ML-KEM IP top for SoC integration (SPEC section 4): an AXI4-Lite register
+// slave, an AXI4 slave on the request/result buffer, and a level interrupt.
 //
-//   0x000 CONTROL   WO  exactly one of bit0 START, bit1 ABORT, bit2 ACK
-//   0x004 STATUS    RO  bit0 READY, bit1 BUSY, bit2 DONE, bit3 ERROR
-//   0x008 ERRCODE   RO
-//   0x00C CONFIG    RW  [1:0] operation, [3:2] parameter set (while READY)
-//   0x010 IN0_LEN   RW  0x014 IN1_LEN, 0x018 OUT0_CAP, 0x01C OUT1_CAP (while READY)
-//   0x020-0x03C     reserved, SLVERR
-//   0x040-0x07C SEED WO  d||z (KeyGen) or m (Encaps), while READY
+// AXI4-Lite (s_axil), 32-bit data, 4 KB aperture:
+//   0x000 CONTROL     WO  exactly one of bit0 START, bit1 ABORT, bit2 ACK
+//   0x004 STATUS      RO  bit0 READY, bit1 BUSY, bit2 DONE, bit3 ERROR
+//   0x008 ERRCODE     RO
+//   0x00C CONFIG      RW  [1:0] operation, [3:2] parameter set (while READY)
+//   0x010 IRQ_ENABLE  RW  bit0: irq follows DONE / ERROR
+//   0x014 VERSION     RO
+//   0x040-0x07C SEED  WO  d||z (KeyGen) or m (Encaps), while READY
+// Only aligned 32-bit accesses with all strobes are supported; anything else,
+// a register in the wrong direction, an unmapped offset or a command illegal
+// in the current state returns SLVERR without side effects.
 //
-// Only aligned 32-bit accesses with all strobes are supported;
-// anything else, a register in the wrong direction, an unmapped offset or a
-// command illegal in the current state returns SLVERR without side effects.
+// AXI4 (s_axi), 64-bit data, 8 KB aperture: the 4736-byte request/result
+// buffer at offset 0 (mlkem_iobuf). While READY the host writes the request
+// (Encaps ek, Decaps dk || c, nothing for KeyGen); after DONE the buffer holds
+// the result (KeyGen ek || dk, Encaps c || K, Decaps K), all from offset 0.
+// While BUSY or while a wipe runs every access returns SLVERR. ACK after DONE
+// wipes the buffer, a failed request wipes it before ERROR rises, and reset
+// wipes it before READY; READY stays low while a wipe runs.
 module mlkem_axi #(
-    parameter ADDR_W = 12
+    parameter ID_W = 4
 )(
     input wire aclk,
     input wire aresetn,
 
-    input wire [ADDR_W-1:0] s_axi_awaddr,
+    // AXI4-Lite register slave
+    input wire [11:0] s_axil_awaddr,
+    input wire s_axil_awvalid,
+    output wire s_axil_awready,
+    input wire [31:0] s_axil_wdata,
+    input wire [3:0] s_axil_wstrb,
+    input wire s_axil_wvalid,
+    output wire s_axil_wready,
+    output reg [1:0] s_axil_bresp,
+    output reg s_axil_bvalid,
+    input wire s_axil_bready,
+    input wire [11:0] s_axil_araddr,
+    input wire s_axil_arvalid,
+    output wire s_axil_arready,
+    output reg [31:0] s_axil_rdata,
+    output reg [1:0] s_axil_rresp,
+    output reg s_axil_rvalid,
+    input wire s_axil_rready,
+
+    // AXI4 buffer slave
+    input wire [ID_W-1:0] s_axi_awid,
+    input wire [12:0] s_axi_awaddr,
+    input wire [7:0] s_axi_awlen,
+    input wire [2:0] s_axi_awsize,
+    input wire [1:0] s_axi_awburst,
     input wire s_axi_awvalid,
     output wire s_axi_awready,
-    input wire [31:0] s_axi_wdata,
-    input wire [3:0] s_axi_wstrb,
+    input wire [63:0] s_axi_wdata,
+    input wire [7:0] s_axi_wstrb,
+    input wire s_axi_wlast,
     input wire s_axi_wvalid,
     output wire s_axi_wready,
-    output reg [1:0] s_axi_bresp,
-    output reg s_axi_bvalid,
+    output wire [ID_W-1:0] s_axi_bid,
+    output wire [1:0] s_axi_bresp,
+    output wire s_axi_bvalid,
     input wire s_axi_bready,
-    input wire [ADDR_W-1:0] s_axi_araddr,
+    input wire [ID_W-1:0] s_axi_arid,
+    input wire [12:0] s_axi_araddr,
+    input wire [7:0] s_axi_arlen,
+    input wire [2:0] s_axi_arsize,
+    input wire [1:0] s_axi_arburst,
     input wire s_axi_arvalid,
     output wire s_axi_arready,
-    output reg [31:0] s_axi_rdata,
-    output reg [1:0] s_axi_rresp,
-    output reg s_axi_rvalid,
+    output wire [ID_W-1:0] s_axi_rid,
+    output wire [63:0] s_axi_rdata,
+    output wire [1:0] s_axi_rresp,
+    output wire s_axi_rlast,
+    output wire s_axi_rvalid,
     input wire s_axi_rready,
-
-    input wire [63:0] s_axis_tdata,
-    input wire [7:0] s_axis_tkeep,
-    input wire s_axis_tlast,
-    input wire s_axis_tvalid,
-    output wire s_axis_tready,
-    output wire [63:0] m_axis_tdata,
-    output wire [7:0] m_axis_tkeep,
-    output wire m_axis_tlast,
-    output wire m_axis_tvalid,
-    input wire m_axis_tready,
 
     output wire irq
 );
 
-    `include "mlkem_funcs.vh"
-
+    localparam [31:0] VERSION = 32'h0002_0000;      // 2.0: memory-mapped buffer
     localparam [1:0] RESP_OKAY = 2'b00, RESP_SLVERR = 2'b10;
 
     // State
     reg [3:0] config_r;
-    reg [31:0] in0_len, in1_len, out0_cap, out1_cap;
-    reg [511:0] seed;
-    reg [15:0] seed_cov;
+    reg irq_en;
+    reg [15:0] seed_cov;            // seed words written since the last START
     reg busy_r, done_r, error_r;
     reg aborted;
     reg [2:0] code_r;
+    reg err_pend;                   // failed: ERROR rises once the buffer is wiped
+    reg [2:0] code_pend;
+    reg wipe_q;
+    wire wiping;
 
     reg core_start;
     reg core_abort;
     wire core_ready, core_done, core_error;
     wire [2:0] core_code;
 
-    wire ready = core_ready && !busy_r && !done_r && !error_r;
-    assign irq = done_r || error_r;
-
-    // Expected request/result sizes for the programmed configuration
-    wire [2:0] k = mlkem_k(config_r[3:2]);
-    wire [31:0] ek_len = 32'd384 * k + 32'd32;
-    wire [31:0] dk_len = 32'd768 * k + 32'd96;
-    wire [31:0] c_len = 32'd32 * ({28'd0, mlkem_du(k)} * k + {28'd0, mlkem_dv(k)});
-    reg len_ok;
-    reg seed_ok;
-    always @(*) begin
-        case (config_r[1:0])
-            `MLKEM_OP_KEYGEN: begin
-                len_ok = (in0_len == 0) && (in1_len == 0) && (out0_cap >= ek_len) && (out1_cap >= dk_len);
-                seed_ok = &seed_cov;
-            end
-            `MLKEM_OP_ENCAPS: begin
-                len_ok = (in0_len == ek_len) && (in1_len == 0) && (out0_cap >= c_len) && (out1_cap >= 32);
-                seed_ok = &seed_cov[7:0];
-            end
-            default: begin
-                len_ok = (in0_len == dk_len) && (in1_len == c_len) && (out0_cap >= 32) && (out1_cap == 0);
-                seed_ok = 1'b1;
-            end
-        endcase
+    // READY and the START checks below are registered. Two register writes
+    // are at least three cycles apart (AW, W, B), so a write always sees the
+    // values left by the previous one.
+    reg ready;
+    always @(posedge aclk) begin
+        if (!aresetn)
+            ready <= 1'b0;
+        else
+            ready <= core_ready && !busy_r && !done_r && !error_r && !err_pend && !wiping && !wipe_q;
     end
-    wire cfg_ok = (config_r[1:0] != 2'd3) && (config_r[3:2] != 2'd3);
+    assign irq = irq_en && (done_r || error_r);
 
-    // Write path
+    reg seed_ok;
+    reg cfg_ok;
+    always @(posedge aclk) begin
+        case (config_r[1:0])
+            `MLKEM_OP_KEYGEN: seed_ok <= &seed_cov;
+            `MLKEM_OP_ENCAPS: seed_ok <= &seed_cov[7:0];
+            default: seed_ok <= 1'b1;
+        endcase
+        cfg_ok <= (config_r[1:0] != 2'd3) && (config_r[3:2] != 2'd3);
+    end
+
+    // Write path. The address is decoded when it is accepted, so the data
+    // transfer only combines registered selects with the write data.
     reg w_addr_ok;
-    reg w_data;
-    reg [ADDR_W-1:0] w_addr;
+    reg w_aligned_reg;              // 32-bit aligned address
+    reg w_ctrl_reg;                 // 0x000 CONTROL
+    reg w_cfg_reg;                  // 0x00C CONFIG
+    reg w_ie_reg;                   // 0x010 IRQ_ENABLE
+    reg [15:0] w_seed_reg;          // 0x040 + 4 * i SEED word i
 
-    assign s_axi_awready = !w_addr_ok && !s_axi_bvalid;
-    assign s_axi_wready = w_addr_ok && !s_axi_bvalid;
-    wire w_fire = s_axi_wvalid && s_axi_wready;
+    assign s_axil_awready = !w_addr_ok && !s_axil_bvalid;
+    // An address is accepted only while no response is pending, so the data
+    // can be taken as soon as the address is held.
+    assign s_axil_wready = w_addr_ok;
+    wire w_fire = s_axil_wvalid && s_axil_wready;
 
-    wire w_legal = (w_addr[1:0] == 2'b00) && (s_axi_wstrb == 4'hF);
-    wire is_seed_w = (w_addr[ADDR_W-1:6] == (12'h040 >> 6));
-    wire [3:0] seed_w = w_addr[5:2];
+    wire w_legal = w_aligned_reg && (s_axil_wstrb == 4'hF);
 
-    // Register write legality and effect (evaluated on the data transfer).
+    // Register write legality (evaluated on the data transfer)
     reg w_ok;
     always @(*) begin
         w_ok = 1'b0;
         if (w_legal) begin
-            if (is_seed_w) begin
+            if (w_seed_reg != 16'd0)
                 w_ok = ready;
-            end else begin
-                case (w_addr)
-                    12'h000: w_ok = ((s_axi_wdata == 32'h1) && ready) ||
-                                    ((s_axi_wdata == 32'h2) && busy_r) ||
-                                    ((s_axi_wdata == 32'h4) && (done_r || error_r));
-                    12'h00C: w_ok = ready && (s_axi_wdata[31:4] == 28'd0);
-                    12'h010, 12'h014, 12'h018, 12'h01C: w_ok = ready;
-                    default: w_ok = 1'b0;
-                endcase
-            end
+            else if (w_ctrl_reg)
+                w_ok = ((s_axil_wdata == 32'h1) && ready) ||
+                       ((s_axil_wdata == 32'h2) && (busy_r || err_pend)) ||
+                       ((s_axil_wdata == 32'h4) && (done_r || error_r));
+            else if (w_cfg_reg)
+                w_ok = ready && (s_axil_wdata[31:4] == 28'd0);
+            else if (w_ie_reg)
+                w_ok = (s_axil_wdata[31:1] == 31'd0);
         end
     end
 
+    integer wi;
     always @(posedge aclk) begin
         if (!aresetn) begin
             w_addr_ok <= 1'b0;
-            s_axi_bvalid <= 1'b0;
-            s_axi_bresp <= RESP_OKAY;
+            s_axil_bvalid <= 1'b0;
+            s_axil_bresp <= RESP_OKAY;
         end else begin
-            if (s_axi_awvalid && s_axi_awready) begin
+            if (s_axil_awvalid && s_axil_awready) begin
                 w_addr_ok <= 1'b1;
-                w_addr <= s_axi_awaddr;
+                w_aligned_reg <= (s_axil_awaddr[1:0] == 2'b00);
+                w_ctrl_reg <= (s_axil_awaddr == 12'h000);
+                w_cfg_reg <= (s_axil_awaddr == 12'h00C);
+                w_ie_reg <= (s_axil_awaddr == 12'h010);
+                for (wi = 0; wi < 16; wi = wi + 1)
+                    w_seed_reg[wi] <= (s_axil_awaddr[11:6] == 6'h01) && (s_axil_awaddr[5:2] == wi);
             end
             if (w_fire) begin
                 w_addr_ok <= 1'b0;
-                s_axi_bvalid <= 1'b1;
-                s_axi_bresp <= w_ok ? RESP_OKAY : RESP_SLVERR;
+                s_axil_bvalid <= 1'b1;
+                s_axil_bresp <= w_ok ? RESP_OKAY : RESP_SLVERR;
             end
-            if (s_axi_bvalid && s_axi_bready)
-                s_axi_bvalid <= 1'b0;
+            if (s_axil_bvalid && s_axil_bready)
+                s_axil_bvalid <= 1'b0;
         end
     end
 
     // Read path
     reg r_busy;
-    reg [ADDR_W-1:0] r_addr;
-    assign s_axi_arready = !r_busy;
+    reg [11:0] r_addr;
+    assign s_axil_arready = !r_busy;
 
     reg [31:0] r_val;
     reg r_ok;
     always @(*) begin
         r_val = 32'd0;
-        r_ok = (r_addr[1:0] == 2'b00);
+        r_ok = 1'b1;
         case (r_addr)
-            12'h004: r_val = {28'd0, error_r, done_r, busy_r, ready};
-            12'h00C: r_val = {28'd0, config_r};
-            12'h010: r_val = in0_len;
-            12'h014: r_val = in1_len;
-            12'h018: r_val = out0_cap;
-            12'h01C: r_val = out1_cap;
+            12'h004: r_val = {28'd0, error_r, done_r, busy_r || err_pend, ready};
             12'h008: r_val = {29'd0, code_r};
+            12'h00C: r_val = {28'd0, config_r};
+            12'h010: r_val = {31'd0, irq_en};
+            12'h014: r_val = VERSION;
             default: r_ok = 1'b0;
         endcase
     end
@@ -177,102 +209,150 @@ module mlkem_axi #(
     always @(posedge aclk) begin
         if (!aresetn) begin
             r_busy <= 1'b0;
-            s_axi_rvalid <= 1'b0;
+            s_axil_rvalid <= 1'b0;
         end else begin
-            if (s_axi_arvalid && s_axi_arready) begin
+            if (s_axil_arvalid && s_axil_arready) begin
                 r_busy <= 1'b1;
-                r_addr <= s_axi_araddr;
-            end else if (r_busy && !s_axi_rvalid) begin
-                s_axi_rvalid <= 1'b1;
-                s_axi_rdata <= r_ok ? r_val : 32'd0;
-                s_axi_rresp <= r_ok ? RESP_OKAY : RESP_SLVERR;
-            end else if (s_axi_rvalid && s_axi_rready) begin
+                r_addr <= s_axil_araddr;
+            end else if (r_busy && !s_axil_rvalid) begin
+                s_axil_rvalid <= 1'b1;
+                s_axil_rdata <= r_ok ? r_val : 32'd0;
+                s_axil_rresp <= r_ok ? RESP_OKAY : RESP_SLVERR;
+            end else if (s_axil_rvalid && s_axil_rready) begin
                 r_busy <= 1'b0;
-                s_axi_rvalid <= 1'b0;
+                s_axil_rvalid <= 1'b0;
             end
         end
     end
 
     // Registers and core
+    // An accepted write takes effect one cycle after its data transfer: the
+    // transfer registers the data and one strobe per target, so the seed
+    // words of the core see flip-flops on their enables. The next write is at
+    // least three cycles later (B, AW, W), and a read issued after the B
+    // response sees the new value.
     wire wr_now = w_fire && w_ok;
+    reg [31:0] wr_data;
+    reg wr_ctrl, wr_cfg, wr_ie;
+    reg [15:0] wr_seed;
+    always @(posedge aclk) begin
+        if (!aresetn) begin
+            wr_ctrl <= 1'b0;
+            wr_cfg <= 1'b0;
+            wr_ie <= 1'b0;
+            wr_seed <= 16'd0;
+        end else begin
+            wr_ctrl <= wr_now && w_ctrl_reg;
+            wr_cfg <= wr_now && w_cfg_reg;
+            wr_ie <= wr_now && w_ie_reg;
+            wr_seed <= wr_now ? w_seed_reg : 16'd0;
+        end
+        wr_data <= s_axil_wdata;
+    end
+
+    // START checks of the CONTROL write (the check registers are settled:
+    // the last register write was at least three cycles earlier)
+    wire start_wr = wr_ctrl && wr_data[0];
+    wire start_ok = cfg_ok && seed_ok;
+
+    // The seed words live in the core. Coverage restarts with every START;
+    // a refused START also clears the seed (the core clears it at the end of
+    // an accepted request).
+    reg seed_drop;
+    always @(posedge aclk) begin
+        if (!aresetn)
+            seed_drop <= 1'b0;
+        else
+            seed_drop <= start_wr && !start_ok;
+    end
+
+    integer si;
+    always @(posedge aclk) begin
+        if (!aresetn || core_start || seed_drop) begin
+            seed_cov <= 16'd0;
+        end else begin
+            for (si = 0; si < 16; si = si + 1)
+                if (wr_seed[si])
+                    seed_cov[si] <= 1'b1;
+        end
+    end
+
     always @(posedge aclk) begin
         if (!aresetn) begin
             config_r <= 4'd0;
-            in0_len <= 32'd0;
-            in1_len <= 32'd0;
-            out0_cap <= 32'd0;
-            out1_cap <= 32'd0;
-            seed <= 512'd0;
-            seed_cov <= 16'd0;
+            irq_en <= 1'b0;
+        end else begin
+            if (wr_cfg)
+                config_r <= wr_data[3:0];
+            if (wr_ie)
+                irq_en <= wr_data[0];
+        end
+    end
+
+    always @(posedge aclk) begin
+        if (!aresetn) begin
             busy_r <= 1'b0;
             aborted <= 1'b0;
             done_r <= 1'b0;
             error_r <= 1'b0;
             code_r <= `MLKEM_ERR_NONE;
+            err_pend <= 1'b0;
+            code_pend <= `MLKEM_ERR_NONE;
+            wipe_q <= 1'b0;
             core_start <= 1'b0;
             core_abort <= 1'b0;
         end else begin
             core_start <= 1'b0;
             core_abort <= 1'b0;
-            // The core latches the seed with START; drop the copy afterwards.
-            if (core_start) begin
-                seed <= 512'd0;
-                seed_cov <= 16'd0;
-            end
+            wipe_q <= 1'b0;
+            // A result stays in the buffer until ACK; a failure (or an ABORT,
+            // also one that meets the completion) wipes it before ERROR.
             if (core_done || core_error) begin
                 busy_r <= 1'b0;
                 aborted <= 1'b0;
-                done_r <= core_done && !aborted;
-                error_r <= core_error || aborted;
-                code_r <= aborted ? `MLKEM_ERR_ABORT : core_error ? core_code : `MLKEM_ERR_NONE;
-            end
-            if (wr_now) begin
-                if (is_seed_w) begin
-                    seed[seed_w*32 +: 32] <= s_axi_wdata;
-                    seed_cov[seed_w] <= 1'b1;
+                if (core_done && !aborted) begin
+                    done_r <= 1'b1;
                 end else begin
-                    case (w_addr)
-                        12'h000: begin
-                            if (s_axi_wdata[0]) begin
-                                if (!cfg_ok) begin
-                                    error_r <= 1'b1;
-                                    code_r <= `MLKEM_ERR_CONFIG;
-                                end else if (!len_ok) begin
-                                    error_r <= 1'b1;
-                                    code_r <= `MLKEM_ERR_FRAME;
-                                end else if (!seed_ok) begin
-                                    error_r <= 1'b1;
-                                    code_r <= 3'd4;
-                                end else begin
-                                    busy_r <= 1'b1;
-                                    core_start <= 1'b1;
-                                end
-                                if (!cfg_ok || !len_ok || !seed_ok) begin
-                                    seed <= 512'd0;
-                                    seed_cov <= 16'd0;
-                                end
-                            end
-                            if (s_axi_wdata[1]) begin
-                                core_abort <= 1'b1;
-                                aborted <= 1'b1;
-                            end
-                            if (s_axi_wdata[2]) begin
-                                done_r <= 1'b0;
-                                error_r <= 1'b0;
-                                code_r <= `MLKEM_ERR_NONE;
-                            end
-                        end
-                        12'h00C: config_r <= s_axi_wdata[3:0];
-                        12'h010: in0_len <= s_axi_wdata;
-                        12'h014: in1_len <= s_axi_wdata;
-                        12'h018: out0_cap <= s_axi_wdata;
-                        12'h01C: out1_cap <= s_axi_wdata;
-                        default: ;
-                    endcase
+                    err_pend <= 1'b1;
+                    wipe_q <= 1'b1;
+                    code_pend <= aborted ? `MLKEM_ERR_ABORT : core_code;
                 end
+            end
+            if (err_pend && !wipe_q && !wiping) begin
+                err_pend <= 1'b0;
+                error_r <= 1'b1;
+                code_r <= code_pend;
+            end
+            if (start_wr) begin
+                if (!cfg_ok) begin
+                    error_r <= 1'b1;
+                    code_r <= `MLKEM_ERR_CONFIG;
+                end else if (!seed_ok) begin
+                    error_r <= 1'b1;
+                    code_r <= `MLKEM_ERR_SEED;
+                end else begin
+                    busy_r <= 1'b1;
+                    core_start <= 1'b1;
+                end
+            end
+            // An ABORT that meets the completion of the request is dropped:
+            // the request reports its own result.
+            if (wr_ctrl && wr_data[1] && busy_r && !(core_done || core_error)) begin
+                core_abort <= 1'b1;
+                aborted <= 1'b1;
+            end
+            if (wr_ctrl && wr_data[2]) begin
+                if (done_r)
+                    wipe_q <= 1'b1;
+                done_r <= 1'b0;
+                error_r <= 1'b0;
+                code_r <= `MLKEM_ERR_NONE;
             end
         end
     end
+
+    wire [63:0] in_data, out_data;
+    wire in_valid, in_ready, out_valid, out_ready;
 
     mlkem_core u_core (
         .clk(aclk),
@@ -280,22 +360,63 @@ module mlkem_axi #(
         .start(core_start),
         .op(config_r[1:0]),
         .pset(config_r[3:2]),
-        .seed(seed),
+        .seed_we(wr_seed),
+        .seed_wdata(wr_data),
+        .seed_clr(seed_drop),
         .abort(core_abort),
         .ready(core_ready),
         .done(core_done),
         .error(core_error),
         .err_code(core_code),
-        .s_axis_tdata(s_axis_tdata),
-        .s_axis_tkeep(s_axis_tkeep),
-        .s_axis_tlast(s_axis_tlast),
-        .s_axis_tvalid(s_axis_tvalid),
-        .s_axis_tready(s_axis_tready),
-        .m_axis_tdata(m_axis_tdata),
-        .m_axis_tkeep(m_axis_tkeep),
-        .m_axis_tlast(m_axis_tlast),
-        .m_axis_tvalid(m_axis_tvalid),
-        .m_axis_tready(m_axis_tready)
+        .in_data(in_data),
+        .in_valid(in_valid),
+        .in_ready(in_ready),
+        .out_data(out_data),
+        .out_valid(out_valid),
+        .out_ready(out_ready)
+    );
+
+    mlkem_iobuf #(.ID_W(ID_W), .ADDR_W(13), .DEPTH(592)) u_buf (
+        .clk(aclk),
+        .rst_n(aresetn),
+        .serve(busy_r),
+        .wipe(wipe_q),
+        .wiping(wiping),
+        .in_valid(in_valid),
+        .in_data(in_data),
+        .in_ready(in_ready),
+        .out_valid(out_valid),
+        .out_data(out_data),
+        .out_ready(out_ready),
+        .s_axi_awid(s_axi_awid),
+        .s_axi_awaddr(s_axi_awaddr),
+        .s_axi_awlen(s_axi_awlen),
+        .s_axi_awsize(s_axi_awsize),
+        .s_axi_awburst(s_axi_awburst),
+        .s_axi_awvalid(s_axi_awvalid),
+        .s_axi_awready(s_axi_awready),
+        .s_axi_wdata(s_axi_wdata),
+        .s_axi_wstrb(s_axi_wstrb),
+        .s_axi_wlast(s_axi_wlast),
+        .s_axi_wvalid(s_axi_wvalid),
+        .s_axi_wready(s_axi_wready),
+        .s_axi_bid(s_axi_bid),
+        .s_axi_bresp(s_axi_bresp),
+        .s_axi_bvalid(s_axi_bvalid),
+        .s_axi_bready(s_axi_bready),
+        .s_axi_arid(s_axi_arid),
+        .s_axi_araddr(s_axi_araddr),
+        .s_axi_arlen(s_axi_arlen),
+        .s_axi_arsize(s_axi_arsize),
+        .s_axi_arburst(s_axi_arburst),
+        .s_axi_arvalid(s_axi_arvalid),
+        .s_axi_arready(s_axi_arready),
+        .s_axi_rid(s_axi_rid),
+        .s_axi_rdata(s_axi_rdata),
+        .s_axi_rresp(s_axi_rresp),
+        .s_axi_rlast(s_axi_rlast),
+        .s_axi_rvalid(s_axi_rvalid),
+        .s_axi_rready(s_axi_rready)
     );
 
 endmodule

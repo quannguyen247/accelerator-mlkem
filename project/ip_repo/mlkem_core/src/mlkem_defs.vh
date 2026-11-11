@@ -9,8 +9,8 @@
 
 `define MLKEM_ERR_NONE   3'd0
 `define MLKEM_ERR_CONFIG 3'd1
-`define MLKEM_ERR_FRAME  3'd2
 `define MLKEM_ERR_KEY    3'd3
+`define MLKEM_ERR_SEED   3'd4
 `define MLKEM_ERR_ABORT  3'd6
 
 // Keccak IP mode encodings (keccak_defs.vh)
@@ -18,6 +18,10 @@
 `define MLKEM_KMODE_SHAKE256 2'd1
 `define MLKEM_KMODE_SHA3_256 2'd2
 `define MLKEM_KMODE_SHA3_512 2'd3
+
+// FIPS 202 domain suffix bytes (padding is done by the hash engine)
+`define MLKEM_PAD_SHA3  8'h06
+`define MLKEM_PAD_SHAKE 8'h1F
 
 // NTT lane load sources
 `define MLKEM_LD_CBD 2'd0

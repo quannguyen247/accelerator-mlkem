@@ -13,10 +13,14 @@
     reg [11:0] a_reg, b_reg;
     reg [13:0] b3_reg;
 
-    // Stage 2: radix-4 product, six partial products a[2j+1:2j] * b
+    // Stage 2: radix-4 partial products a[2j+1:2j] * b, summed three by three
     wire [13:0] pp0, pp1, pp2, pp3, pp4, pp5;
     wire [17:0] sum_lo;
     wire [17:0] sum_hi;
+    reg [17:0] sum_lo_reg;
+    reg [17:0] sum_hi_reg;
+
+    // Stage 3: product
     wire [23:0] t_comb;
     reg [23:0] t_reg;
 
@@ -54,7 +58,8 @@
     endfunction
 
     // Registered operands break the INTT subtract -> multiply path.
-    // Five-cycle latency: operands, product, m, t+m*q, canonical result.
+    // Six-cycle latency: operands, partial sums, product, m, t+m*q,
+    // canonical result.
     always @(posedge clk) begin
         a_reg <= a_i;
         b_reg <= b_i;
@@ -68,10 +73,16 @@
     assign pp4 = radix4_pp(a_reg[9:8], b_reg, b3_reg);
     assign pp5 = radix4_pp(a_reg[11:10], b_reg, b3_reg);
 
-    // Two three-input adders, then one two-input adder
+    // Two three-input adders, then (next stage) one two-input adder
     assign sum_lo = {4'd0, pp0} + {2'd0, pp1, 2'd0} + {pp2, 4'd0};
     assign sum_hi = {4'd0, pp3} + {2'd0, pp4, 2'd0} + {pp5, 4'd0};
-    assign t_comb = {6'd0, sum_lo} + {sum_hi, 6'd0};
+
+    always @(posedge clk) begin
+        sum_lo_reg <= sum_lo;
+        sum_hi_reg <= sum_hi;
+    end
+
+    assign t_comb = {6'd0, sum_lo_reg} + {sum_hi_reg, 6'd0};
 
     always @(posedge clk) begin
         t_reg <= t_comb;

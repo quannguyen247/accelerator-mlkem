@@ -4,7 +4,14 @@
 module ntt_core_top #(
     // 1: INTT ends with the scale pass (default). 0: no scale pass, the INTT
     // result is 128 times the inverse transform (256 cycles shorter).
-    parameter INTT_SCALE = 1
+    parameter INTT_SCALE = 1,
+    // 1: the RAM ports are driven by registers. ext_addr is taken one cycle
+    // ahead of the access (the address register of the AGU follows it while
+    // the core is idle), so ext_we / ext_din / ext_dout belong to the address
+    // of the previous cycle, and every write lands one cycle later.
+    // 0 (default): ext_addr, ext_we, ext_din and ext_dout belong to the same
+    // cycle.
+    parameter PORT_REG = 0
 )(
     input wire clk,
     input wire rst_n,
@@ -19,6 +26,9 @@ module ntt_core_top #(
 );
 
     localparam AFIFO_DEPTH = 16;
+    // Cycles from the controller's done to the last RAM write: the butterfly
+    // pipeline, plus the registered write port.
+    localparam DRAIN = (PORT_REG != 0) ? 11 : 10;
 
     wire [1:0] fstate;
     wire f_busy;
@@ -45,17 +55,20 @@ module ntt_core_top #(
     wire [11:0] mem_dout1;
     wire mem_we0;
     wire mem_we1;
-    wire [7:0] mem_wr_addr0;
-    wire [7:0] mem_wr_addr1;
+    wire [6:0] mem_wr_addr0;
+    wire [6:0] mem_wr_addr1;
     wire [11:0] mem_wr_data0;
     wire [11:0] mem_wr_data1;
 
     wire ram_we0;
     wire ram_we1;
-    wire [7:0] ram_addr_wr0;
-    wire [7:0] ram_addr_wr1;
-    wire [7:0] ram_addr_rd0;
-    wire [7:0] ram_addr_rd1;
+    wire [6:0] ram_addr_wr0;
+    wire [6:0] ram_addr_wr1;
+    wire [6:0] ram_addr_rd0;
+    wire [6:0] ram_addr_rd1;
+    wire ram_bank_rd0;
+    wire ram_bank_rd1;
+    wire agu_bank_a;
     wire [11:0] ram_din0;
     wire [11:0] ram_din1;
 
@@ -63,8 +76,8 @@ module ntt_core_top #(
     reg mode_r;
     reg [7:0] zidx_d1;
     reg is_scale_d1;
-    // Drain the extra registered multiplier operand stage before releasing RAM.
-    reg [8:0] done_delay;
+    // Drain the butterfly pipeline before releasing the RAM.
+    reg [DRAIN:0] done_delay;
 
     wire actual_done;
     wire actual_busy;
@@ -72,18 +85,19 @@ module ntt_core_top #(
     // one flip-flop selects the RAM ports instead of a 10-input OR.
     reg busy_reg;
 
-    reg [7:0] afifo_a [0:AFIFO_DEPTH-1];
-    reg [7:0] afifo_b [0:AFIFO_DEPTH-1];
+    // Write-back addresses: the word inside the bank (address without its top
+    // bit) and the bank (address parity), stored together so the RAM write
+    // selects need no XOR tree behind the FIFO read.
+    reg [6:0] afifo_a [0:AFIFO_DEPTH-1];
+    reg [6:0] afifo_b [0:AFIFO_DEPTH-1];
     reg afifo_scale [0:AFIFO_DEPTH-1];
-    // Bank (address parity) of each write-back address, stored with it so the
-    // RAM write selects need no XOR tree behind the FIFO read.
     reg afifo_bank_a [0:AFIFO_DEPTH-1];
     reg afifo_bank_b [0:AFIFO_DEPTH-1];
     reg [3:0] afifo_wptr;
     reg [3:0] afifo_rptr;
 
-    wire [7:0] wb_addr_a;
-    wire [7:0] wb_addr_b;
+    wire [6:0] wb_addr_a;
+    wire [6:0] wb_addr_b;
     wire wb_scale;
     wire wb_bank_a;
     wire wb_bank_b;
@@ -114,25 +128,25 @@ module ntt_core_top #(
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            done_delay <= 9'd0;
+            done_delay <= {(DRAIN+1){1'b0}};
         end else begin
-            done_delay <= {done_delay[7:0], f_done};
+            done_delay <= {done_delay[DRAIN-1:0], f_done};
         end
     end
 
     // Busy from the accepted start until the last pipeline write has landed
-    // (equal to f_busy || f_done || |done_delay[7:0]).
+    // (equal to f_busy || f_done || |done_delay[DRAIN-1:0]).
     always @(posedge clk) begin
         if (!rst_n) begin
             busy_reg <= 1'b0;
         end else if (controller_start) begin
             busy_reg <= 1'b1;
-        end else if (done_delay[7]) begin
+        end else if (done_delay[DRAIN-1]) begin
             busy_reg <= 1'b0;
         end
     end
 
-    assign actual_done = done_delay[8];
+    assign actual_done = done_delay[DRAIN];
     assign actual_busy = busy_reg;
     assign controller_start = start && !start_d && !actual_busy;
     assign advance_now = f_busy && !f_done;
@@ -142,18 +156,31 @@ module ntt_core_top #(
     assign done = actual_done;
 
     assign ram_we0 = actual_busy ? mem_we0 : ext_we;
-    assign ram_addr_wr0 = actual_busy ? mem_wr_addr0 : ext_addr;
     assign ram_din0 = actual_busy ? mem_wr_data0 : ext_din;
 
-    assign ram_bank_wr0 = actual_busy ? wb_bank_a : ^ext_addr;
+    // Port 0 address: the butterfly's a operand, or the external access.
+    generate
+        if (PORT_REG != 0) begin : g_port_reg
+            assign ram_addr_wr0 = actual_busy ? mem_wr_addr0 : addr_a[6:0];
+            assign ram_bank_wr0 = actual_busy ? wb_bank_a : agu_bank_a;
+            assign ram_addr_rd0 = addr_a[6:0];
+            assign ram_bank_rd0 = agu_bank_a;
+        end else begin : g_port_comb
+            assign ram_addr_wr0 = actual_busy ? mem_wr_addr0 : ext_addr[6:0];
+            assign ram_bank_wr0 = actual_busy ? wb_bank_a : ^ext_addr;
+            assign ram_addr_rd0 = actual_busy ? addr_a[6:0] : ext_addr[6:0];
+            assign ram_bank_rd0 = actual_busy ? agu_bank_a : ^ext_addr;
+        end
+    endgenerate
 
     assign ram_we1 = actual_busy ? mem_we1 : 1'b0;
     assign ram_bank_wr1 = wb_bank_b;
-    assign ram_addr_wr1 = actual_busy ? mem_wr_addr1 : 8'd0;
+    assign ram_addr_wr1 = actual_busy ? mem_wr_addr1 : 7'd0;
     assign ram_din1 = actual_busy ? mem_wr_data1 : 12'd0;
 
-    assign ram_addr_rd0 = actual_busy ? addr_a : ext_addr;
-    assign ram_addr_rd1 = actual_busy ? addr_b : 8'd0;
+    // Port 1 reads the b operand (used only by a running butterfly).
+    assign ram_addr_rd1 = addr_b[6:0];
+    assign ram_bank_rd1 = !agu_bank_a;
 
     assign ext_dout = mem_dout0;
     assign is_scale_now = (fstate == 2'd2);
@@ -175,20 +202,25 @@ module ntt_core_top #(
         .cnt(cnt)
     );
 
-    ntt_agu u_agu (
+    ntt_agu #(
+        .IDLE_ADDR(PORT_REG)
+    ) u_agu (
         .clk(clk),
         .rst_n(rst_n),
         .start(f_busy),
         .len(len),
         .pos(pos),
         .block_idx(zidx),
+        .idle_addr(ext_addr),
         .addr_a(addr_a),
-        .addr_b(addr_b)
+        .addr_b(addr_b),
+        .bank_a(agu_bank_a)
     );
 
     ntt_ram_dual #(
         .DEPTH(256),
-        .ADDR_WIDTH(8)
+        .ADDR_WIDTH(8),
+        .WR_REG(PORT_REG)
     ) u_mem (
         .clk(clk),
         .we0(ram_we0),
@@ -199,7 +231,9 @@ module ntt_core_top #(
         .bank_wr1(ram_bank_wr1),
         .addr_wr1(ram_addr_wr1),
         .din1(ram_din1),
+        .bank_rd0(ram_bank_rd0),
         .addr_rd0(ram_addr_rd0),
+        .bank_rd1(ram_bank_rd1),
         .addr_rd1(ram_addr_rd1),
         .dout0(mem_dout0),
         .dout1(mem_dout1)
@@ -229,8 +263,8 @@ module ntt_core_top #(
         if (!rst_n) begin
             afifo_wptr <= 0;
         end else if (bf_valid_in) begin
-            afifo_a[afifo_wptr] <= addr_a;
-            afifo_b[afifo_wptr] <= addr_b;
+            afifo_a[afifo_wptr] <= addr_a[6:0];
+            afifo_b[afifo_wptr] <= addr_b[6:0];
             afifo_scale[afifo_wptr] <= is_scale_d1;
             afifo_bank_a[afifo_wptr] <= ^addr_a;
             afifo_bank_b[afifo_wptr] <= ^addr_b;
