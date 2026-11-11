@@ -41,11 +41,12 @@ module keccak_sponge (
     // Job config
     reg [`KECCAK_MODE_WIDTH-1:0] mode_reg;
     reg absorb_last_reg;
-    reg absorb_mid_en_reg; // rate > 576 bits (all modes except SHA3-512)
-    reg absorb_hi_en_reg;  // rate > 1088 bits (SHAKE128 only)
+    // Rate lanes of the mode: 9 (SHA3-512), 17 (SHAKE256, SHA3-256) or 21
+    // (SHAKE128); an accepted block is XORed into these lanes only, so the
+    // capacity is never written.
+    reg [`KECCAK_NUM_LANES-1:0] absorb_lanes_reg;
 
-    // Rate-masked datapath
-    reg [`KECCAK_STATE_WIDTH-1:0] absorb_block;
+    // Rate-masked output
     reg [`KECCAK_RATE_BITS-1:0] squeeze_data;
 
     // Absorb/squeeze handshake flags
@@ -63,7 +64,8 @@ module keccak_sponge (
         .rst_n(rst_n),
         .clear(curr_state == ST_IDLE),
         .in_valid(perm_start),
-        .xor_in((curr_state == ST_ABSORB) ? absorb_block : {`KECCAK_STATE_WIDTH{1'b0}}),
+        .xor_lane_en((curr_state == ST_ABSORB) ? absorb_lanes_reg : {`KECCAK_NUM_LANES{1'b0}}),
+        .xor_in({{(`KECCAK_STATE_WIDTH - `KECCAK_RATE_BITS){1'b0}}, absorb_in}),
         .last_round(perm_last),
         .state_out(keccak_state)
     );
@@ -84,17 +86,6 @@ module keccak_sponge (
             ST_DONE: next_state = ST_IDLE;
             default: next_state = ST_IDLE;
         endcase
-    end
-
-    // Absorb mask
-    always @(*) begin
-        absorb_block = {`KECCAK_STATE_WIDTH{1'b0}};
-        absorb_block[`SHA3_512_RATE_BITS-1:0] = absorb_in[`SHA3_512_RATE_BITS-1:0];
-
-        if (absorb_mid_en_reg)
-            absorb_block[`SHAKE256_RATE_BITS-1:`SHA3_512_RATE_BITS] = absorb_in[`SHAKE256_RATE_BITS-1:`SHA3_512_RATE_BITS];
-        if (absorb_hi_en_reg)
-            absorb_block[`SHAKE128_RATE_BITS-1:`SHAKE256_RATE_BITS] = absorb_in[`SHAKE128_RATE_BITS-1:`SHAKE256_RATE_BITS];
     end
 
     // Squeeze mask
@@ -121,8 +112,7 @@ module keccak_sponge (
     always @(posedge clk) begin
         if (!rst_n) begin
             mode_reg <= `KECCAK_MODE_SHAKE256;
-            absorb_mid_en_reg <= 1'b1;
-            absorb_hi_en_reg <= 1'b0;
+            absorb_lanes_reg <= {`KECCAK_NUM_LANES{1'b0}} | {(`SHAKE256_RATE_BITS / 64){1'b1}};
             curr_state <= ST_IDLE;
         end else begin
             curr_state <= next_state;
@@ -130,8 +120,10 @@ module keccak_sponge (
                 ST_IDLE: begin
                     if (start) begin
                         mode_reg <= mode;
-                        absorb_mid_en_reg <= (mode != `KECCAK_MODE_SHA3_512);
-                        absorb_hi_en_reg <= (mode == `KECCAK_MODE_SHAKE128);
+                        absorb_lanes_reg <= {`KECCAK_NUM_LANES{1'b0}} |
+                            ((mode == `KECCAK_MODE_SHAKE128) ? {(`SHAKE128_RATE_BITS / 64){1'b1}} :
+                             (mode == `KECCAK_MODE_SHA3_512) ? {(`SHA3_512_RATE_BITS / 64){1'b1}} :
+                                                               {(`SHAKE256_RATE_BITS / 64){1'b1}});
                     end
                 end
                 ST_ABSORB: begin
