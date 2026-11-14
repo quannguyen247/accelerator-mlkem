@@ -6,6 +6,7 @@ module keccak_permutation (
     input wire rst_n,
     input wire clear,
     input wire in_valid,
+    input wire xor_only,                 // XOR the enabled lanes without starting
     // Lanes of xor_in XORed into the state with in_valid. The enable acts on
     // the register enables, so a state bit's input is the round output or
     // the bit XOR its block bit, nothing else.
@@ -58,13 +59,19 @@ module keccak_permutation (
             curr_state <= next_state;
             case (curr_state)
                 ST_IDLE: begin
-                    if (in_valid) begin
+                    // clear (the sponge is idle) never comes with a block or a
+                    // word, so it is tested first: the state reset then depends
+                    // on state registers only. A block (in_valid, starts the
+                    // rounds) or a single word (xor_only) is XORed into the
+                    // enabled lanes through one input path.
+                    if (clear) begin
+                        state_out <= {`KECCAK_STATE_WIDTH{1'b0}};
+                    end else if (in_valid || xor_only) begin
                         for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1)
                             if (xor_lane_en[l])
                                 state_out[64*l +: 64] <= state_out[64*l +: 64] ^ xor_in[64*l +: 64];
-                        round_ctr <= 5'd0;
-                    end else if (clear) begin
-                        state_out <= {`KECCAK_STATE_WIDTH{1'b0}};
+                        if (in_valid)
+                            round_ctr <= 5'd0;
                     end
                 end
                 default: begin

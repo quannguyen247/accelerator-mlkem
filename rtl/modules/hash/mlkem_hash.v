@@ -43,9 +43,13 @@ module mlkem_hash (
     output wire fifo_pop,
 
     // Hash results
-    output reg [255:0] rho,
-    output reg rho_v,
-    output reg [255:0] h,
+    output wire [255:0] rho,
+    output wire rho_v,
+    output wire [255:0] h,
+    // rho / h are held in the input engine's registers: write strobes
+    output wire wr_rho,
+    output wire wr_h,
+    output wire [255:0] wr_val,
     output reg h_v,
     output reg [255:0] kk,
     output reg kk_v,
@@ -69,6 +73,13 @@ module mlkem_hash (
 );
 
     `include "mlkem_funcs.vh"
+
+    // rho: G(d) output in KeyGen, else the input engine's register (no copy)
+    reg rho_g_v;
+    wire op_kg = (op == `MLKEM_OP_KEYGEN);
+    assign rho = rho_in;
+    assign rho_v = op_kg ? rho_g_v : rho_in_v;
+    assign h = h_in;
 
     localparam [2:0] J_G = 3'd0, J_H = 3'd1, J_J = 3'd2, J_PRF = 3'd3, J_XOF = 3'd4,
                      J_WIPE = 3'd5, J_END = 3'd6;
@@ -229,7 +240,15 @@ module mlkem_hash (
     reg k_rst;
     reg absorb_valid;
     reg absorb_last;
-    reg [1343:0] msg_block;
+    // Long-job pad block: the suffix byte in word pad_w and the final bit
+    // of the rate (136-byte rate), XORed with the last block's handshake.
+    reg pad_v;
+    reg [4:0] pad_w;
+    wire [1343:0] pad_blk;
+    // Word absorb strobe per rate lane and the word (registered taken word)
+    reg [20:0] blk_word_reg;
+    reg blk_word_v;                 // some blk_word_reg bit is set
+    reg [63:0] word_reg;
     wire absorb_ready;
     wire squeeze_valid;
     wire [1343:0] squeeze_out;
@@ -288,13 +307,16 @@ module mlkem_hash (
     always @(posedge clk)
         k_rst_n <= rst_n && !kill && !k_rst;
 
-    keccak_sponge u_keccak (
+    keccak_sponge #(.MASK(0)) u_keccak (
         .clk(clk),
         .rst_n(k_rst_n),
         .mode(kmode),
         .absorb_valid(absorb_valid),
         .absorb_last(absorb_last),
-        .absorb_in(msg_block),
+        .absorb_in(is_long ? pad_blk : sblk),
+        .wx_en({4'd0, blk_word_reg}),
+        .wx_word(word_reg),
+        .wx_v(blk_word_v),
         .absorb_ready(absorb_ready),
         .squeeze_ready(squeeze_ready),
         .squeeze_last(squeeze_last),
@@ -314,29 +336,25 @@ module mlkem_hash (
     reg blk_full;
     wire words_left = (rem != 9'd0);
     wire use_z = (jtype == J_J) && !tc[2];
-    wire want_word = (curr_state == ST_ABS) && is_long && !blk_full && words_left;
+    // Words are XORed into the state, so they are taken only while the
+    // sponge waits for the block (not while it permutes the previous one).
+    wire want_word = (curr_state == ST_ABS) && is_long && !blk_full && words_left && absorb_ready;
     assign fifo_pop = want_word && !use_z && !fifo_empty;
     wire got_word = want_word && (use_z || !fifo_empty);
     wire [63:0] word_in = use_z ? z_in[{tc[1:0], 6'd0} +: 64] : fifo_data;
     // A taken word waits one cycle in a register before it lands in the
     // block, so the FIFO read drives 64 flip-flops instead of the whole block.
     // The block is complete in the cycle absorb_valid rises (no extra latency).
-    reg [63:0] word_reg;
 
-    // Keccak input block: every 64-bit word has its own registered strobes.
-    //   blk_ld_reg    load the word: the short block (zero for long jobs and
-    //                 WIPE) or, with blk_word_reg, the message word
-    //   blk_pad_reg   suffix byte in the word after the last message word
-    //   pad_last_reg  final bit of the rate (long jobs use 136 bytes)
-    // A long block is zeroed when its job starts and after every absorb, so
-    // the words behind the suffix stay zero. The word counts of H(ek) and
-    // J(z||c) are never a multiple of 17, so the last block always has room
-    // for the suffix.
-    reg [20:0] blk_ld_reg;
-    reg [20:0] blk_word_reg;
-    reg [20:0] blk_pad_reg;
-    reg pad_last_reg;
+    // Long jobs: each taken word is XORed into its rate lane of the Keccak
+    // state (blk_word_reg strobe, one cycle after the take); the block
+    // handshake then XORs the pad block (suffix byte after the last word,
+    // final bit of the 136-byte rate) and starts the permutation. The word
+    // counts of H(ek) and J(z||c) are never a multiple of 17, so the last
+    // block always has room for the suffix. Short jobs absorb sblk directly
+    // (its inputs are stable from the job start to the absorb).
     wire [7:0] pad_suffix = (jtype == J_J) ? `MLKEM_PAD_SHAKE : `MLKEM_PAD_SHA3;
+    assign pad_blk = pad_v ? (({1336'd0, pad_suffix} << {pad_w, 6'd0}) | (1344'd1 << 1087)) : 1344'd0;
 
     // H(ek) check in two stages: four 64-bit compares, then the verdict
     reg h_chk_reg;
@@ -356,28 +374,20 @@ module mlkem_hash (
     integer w;
     always @(posedge clk) begin
         if (!rst_n || kill) begin
-            blk_ld_reg <= 21'd0;
             blk_word_reg <= 21'd0;
-            blk_pad_reg <= 21'd0;
-            pad_last_reg <= 1'b0;
+            blk_word_v <= 1'b0;
+            pad_v <= 1'b0;
         end else begin
-            for (w = 0; w < 21; w = w + 1) begin
-                blk_ld_reg[w] <= blk_clear || (got_word && (wc == w));
+            for (w = 0; w < 21; w = w + 1)
                 blk_word_reg[w] <= got_word && (wc == w);
-                blk_pad_reg[w] <= got_word && (rem == 9'd1) && (wc + 5'd1 == w);
-            end
-            pad_last_reg <= got_word && (rem == 9'd1);
+            blk_word_v <= got_word;
+            if (blk_clear || scrub)
+                pad_v <= 1'b0;
+            else if (got_word && (rem == 9'd1))
+                pad_v <= 1'b1;
         end
-        for (w = 0; w < 21; w = w + 1) begin
-            if (blk_ld_reg[w])
-                msg_block[64*w +: 64] <= blk_word_reg[w] ? word_reg : sblk[64*w +: 64];
-            if (blk_pad_reg[w])
-                msg_block[64*w +: 8] <= pad_suffix;
-        end
-        if (pad_last_reg)
-            msg_block[1087] <= 1'b1;
-        if (scrub)
-            msg_block <= 1344'd0;
+        if (got_word && (rem == 9'd1))
+            pad_w <= wc + 5'd1;
     end
 
     always @(*) begin
@@ -423,7 +433,7 @@ module mlkem_hash (
             smp_load <= 1'b0;
             nw_busy <= 1'b0;
             nz_we <= 1'b0;
-            rho_v <= 1'b0;
+            rho_g_v <= 1'b0;
             h_v <= 1'b0;
             kk_v <= 1'b0;
             kbar_v <= 1'b0;
@@ -449,8 +459,7 @@ module mlkem_hash (
                 case (jtype)
                     J_G: begin
                         if (op == `MLKEM_OP_KEYGEN) begin
-                            rho <= squeeze_out[255:0];
-                            rho_v <= 1'b1;
+                            rho_g_v <= 1'b1;
                         end else begin
                             kk <= squeeze_out[255:0];
                             kk_v <= 1'b1;
@@ -459,7 +468,6 @@ module mlkem_hash (
                     end
                     J_H: begin
                         if (op != `MLKEM_OP_DECAPS) begin
-                            h <= squeeze_out[255:0];
                             h_v <= 1'b1;
                         end else begin
                             h_chk_reg <= 1'b1;
@@ -490,10 +498,6 @@ module mlkem_hash (
                 endcase
             end
 
-            if (op != `MLKEM_OP_KEYGEN && rho_in_v && !rho_v) begin
-                rho <= rho_in;
-                rho_v <= 1'b1;
-            end
 
             // Noise writer: one 64-bit PRF word per cycle into the lane memory.
             if (nw_busy) begin
@@ -518,7 +522,7 @@ module mlkem_hash (
                         n_prf <= 4'd0;
                         xr <= 2'd0;
                         xj <= 2'd0;
-                        rho_v <= 1'b0;
+                        rho_g_v <= 1'b0;
                         h_v <= 1'b0;
                         kk_v <= 1'b0;
                         kbar_v <= 1'b0;
@@ -630,5 +634,11 @@ module mlkem_hash (
     end
 
     assign busy = (curr_state != ST_IDLE);
+
+    // Written in the cycle the result is taken (sq_cap), with its flag
+    assign wr_val = squeeze_out[255:0];
+    assign wr_rho = sq_cap && (jtype == J_G) && op_kg;
+    assign wr_h = sq_cap && (jtype == J_H) && (op != `MLKEM_OP_DECAPS);
+
 
 endmodule

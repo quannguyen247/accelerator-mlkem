@@ -16,6 +16,15 @@ module mlkem_in (
     input wire kill,
     input wire go,
     input wire scrub,
+    // The rho / h / z registers are shared with the operations that do not
+    // receive them: the hash writes rho (KeyGen) and h (KeyGen, Encaps), the
+    // seed port writes z (KeyGen, 32-bit words); z_clr clears z.
+    input wire ext_rho_we,
+    input wire ext_h_we,
+    input wire [255:0] ext_val,
+    input wire [7:0] ext_z_we,
+    input wire [31:0] ext_z_wdata,
+    input wire z_clr,
     input wire [1:0] op,
     input wire [2:0] k,
     output wire busy,
@@ -179,6 +188,7 @@ module mlkem_in (
     assign busy = active || bv;
 
     integer i;
+    integer zw;
     reg [95:0] red;
     reg bad;
     always @(*) begin
@@ -277,7 +287,14 @@ module mlkem_in (
                 end
             end
 
-            if (scrub) begin
+            if (ext_rho_we)
+                rho <= ext_val;
+            if (ext_h_we)
+                h <= ext_val;
+            for (zw = 0; zw < 8; zw = zw + 1)
+                if (ext_z_we[zw])
+                    z[32*zw +: 32] <= ext_z_wdata;
+            if (scrub || z_clr) begin
                 z <= 256'd0;
                 z_v <= 1'b0;
             end
