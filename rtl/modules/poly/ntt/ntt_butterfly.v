@@ -87,63 +87,51 @@ module ntt_butterfly (
         end
     end
 
+    // Data pipeline: no reset (the valid chain qualifies it), so synthesis
+    // can map the operand delay to shift-register LUTs.
+    always @(posedge clk) begin
+        a_st2 <= a_st1;
+        b_st2 <= b_st1;
+        a_st3 <= a_st2;
+        b_st3 <= b_st2;
+        a_st4 <= a_st3;
+        b_st4 <= b_st3;
+        a_st5 <= a_st4;
+        b_st5 <= b_st4;
+        a_st6 <= a_st5;
+        b_st6 <= b_st5;
+        a_st7 <= a_st6;
+        b_st7 <= b_st6;
+    end
+
+    // Control pipeline
     always @(posedge clk) begin
         if (!rst_n) begin
-            a_st2 <= 12'd0;
-            b_st2 <= 12'd0;
             valid_st2 <= 1'b0;
             is_scale_st2 <= 1'b0;
-
-            a_st3 <= 12'd0;
-            b_st3 <= 12'd0;
             valid_st3 <= 1'b0;
             is_scale_st3 <= 1'b0;
-
-            a_st4 <= 12'd0;
-            b_st4 <= 12'd0;
             valid_st4 <= 1'b0;
             is_scale_st4 <= 1'b0;
-
-            a_st5 <= 12'd0;
-            b_st5 <= 12'd0;
             valid_st5 <= 1'b0;
             is_scale_st5 <= 1'b0;
-            a_st6 <= 12'd0;
-            b_st6 <= 12'd0;
             valid_st6 <= 1'b0;
             is_scale_st6 <= 1'b0;
-            a_st7 <= 12'd0;
-            b_st7 <= 12'd0;
             valid_st7 <= 1'b0;
             is_scale_st7 <= 1'b0;
             valid_st8 <= 1'b0;
             is_scale_st8 <= 1'b0;
         end else begin
-            a_st2 <= a_st1;
-            b_st2 <= b_st1;
             valid_st2 <= valid_st1;
             is_scale_st2 <= is_scale_st1;
-
-            a_st3 <= a_st2;
-            b_st3 <= b_st2;
             valid_st3 <= valid_st2;
             is_scale_st3 <= is_scale_st2;
-
-            a_st4 <= a_st3;
-            b_st4 <= b_st3;
             valid_st4 <= valid_st3;
             is_scale_st4 <= is_scale_st3;
-
-            a_st5 <= a_st4;
-            b_st5 <= b_st4;
             valid_st5 <= valid_st4;
             is_scale_st5 <= is_scale_st4;
-            a_st6 <= a_st5;
-            b_st6 <= b_st5;
             valid_st6 <= valid_st5;
             is_scale_st6 <= is_scale_st5;
-            a_st7 <= a_st6;
-            b_st7 <= b_st6;
             valid_st7 <= valid_st6;
             is_scale_st7 <= is_scale_st6;
             valid_st8 <= valid_st7;
