@@ -14,7 +14,7 @@ module tb_mlkem_trace;
     string names [0:6] = '{"G", "H", "J", "PRF", "XOF", "WIPE", "END"};
 
     // Keccak engine
-    reg [2:0] hs_q;
+    reg [7:0] hs_q;
     integer kbusy;
     integer job_t0;
     integer xof_t0, xof_n;
@@ -25,12 +25,12 @@ module tb_mlkem_trace;
             kbusy = 0;
             xof_n = 0;
         end
-        if (tb_mlkem_core.dut.u_hash.u_keccak.u_sponge.curr_state != 6'b000001)
+        if (tb_mlkem_core.dut.u_hash.u_keccak.curr_state != 6'b000001)
             kbusy = kbusy + 1;
         if (en) begin
-            if (tb_mlkem_core.dut.u_hash.state == 3'd2 && hs_q != 3'd2)
+            if (tb_mlkem_core.dut.u_hash.curr_state == 8'b00000100 && hs_q != 8'b00000100)
                 job_t0 = t;
-            if (tb_mlkem_core.dut.u_hash.state == 3'd4 && tb_mlkem_core.dut.u_hash.k_done) begin
+            if (tb_mlkem_core.dut.u_hash.curr_state == 8'b00100000 && tb_mlkem_core.dut.u_hash.k_done) begin
                 if (tb_mlkem_core.dut.u_hash.jtype == 3'd4) begin
                     if (xof_n == 0) xof_t0 = job_t0;
                     xof_n = xof_n + 1;
@@ -42,26 +42,27 @@ module tb_mlkem_trace;
                 end
             end
         end
-        hs_q <= tb_mlkem_core.dut.u_hash.state;
+        hs_q <= tb_mlkem_core.dut.u_hash.curr_state;
     end
 
-    // NTT lanes
+    // Shared NTT engines (the logical lane of each job is printed)
     genvar g;
     generate
-        for (g = 0; g < 9; g = g + 1) begin : g_l
-            reg [3:0] q;
+        for (g = 0; g < 2; g = g + 1) begin : g_l
+            reg [8:0] q;
             integer tl, tr, tu;
             always @(posedge clk) begin
                 if (en) begin
-                    if (tb_mlkem_core.dut.g_lane[g].u_lane.state == 4'd2 && q != 4'd2) tl = t;
-                    if (tb_mlkem_core.dut.g_lane[g].u_lane.state == 4'd4 && q != 4'd4) tr = t;
-                    if (tb_mlkem_core.dut.g_lane[g].u_lane.state == 4'd6 && q != 4'd6) tu = t;
-                    if (tb_mlkem_core.dut.g_lane[g].u_lane.state == 4'd7 && q != 4'd7)
-                        $display("      lane %0d %s load %5d-%5d  transform %5d-%5d  unload %5d-%5d", g,
+                    if (tb_mlkem_core.dut.g_lane[g].u_lane.curr_state[2] && !q[2]) tl = t;
+                    if (tb_mlkem_core.dut.g_lane[g].u_lane.curr_state[4] && !q[4]) tr = t;
+                    if (tb_mlkem_core.dut.g_lane[g].u_lane.curr_state[6] && !q[6]) tu = t;
+                    if (tb_mlkem_core.dut.g_lane[g].u_lane.curr_state[7] && !q[7])
+                        $display("      engine %0d lane %0d %s load %5d-%5d  transform %5d-%5d  unload %5d-%5d", g,
+                                 tb_mlkem_core.dut.g_lane[g].u_lane.lid,
                                  tb_mlkem_core.dut.g_lane[g].u_lane.jd_mode ? "INTT" : "NTT ",
                                  tl - t0, tr - t0, tr - t0, tu - t0, tu - t0, t - t0);
                 end
-                q <= tb_mlkem_core.dut.g_lane[g].u_lane.state;
+                q <= tb_mlkem_core.dut.g_lane[g].u_lane.curr_state;
             end
         end
     endgenerate

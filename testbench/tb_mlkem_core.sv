@@ -234,7 +234,7 @@ module tb_mlkem_core;
 
         if (first_enc_nin > 0) begin
             run_case("abort during Encaps", 1, first_enc_set, 6, first_enc_sb, first_enc_ib,
-                     first_enc_nin, 0, 0, 1500);
+                     first_enc_nin, 0, 0, 700);
         end
         run_case("invalid configuration", 3, 0, 1, 0, 0, 0, 0, 0, 0);
 

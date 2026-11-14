@@ -516,7 +516,7 @@ module tb_mlkem_axi;
         bread(13'h000, 2, 3'd3, 2'b01, 4'h2);
         check(rd_r[0] == 2'b10 && rd_r[1] == 2'b10 && rd_d[0] == 64'd0 && rd_d[1] == 64'd0,
               "buffer read while busy: SLVERR, zero data");
-        repeat (1500) @(posedge clk);
+        repeat (400) @(posedge clk);
         wr_ok(12'h000, 32'h2);
         wait_outcome(st);
         axi_read(12'h008, v, r);
