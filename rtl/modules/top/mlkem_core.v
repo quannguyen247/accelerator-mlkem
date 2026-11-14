@@ -57,7 +57,6 @@ module mlkem_core (
     reg [1:0] op_r;
     reg [2:0] k_r;
     reg [255:0] seed_a;
-    reg [255:0] seed_z;
     reg go;
     reg launch;                     // op_r / k_r latched, go follows next cycle
     reg kill;
@@ -77,7 +76,6 @@ module mlkem_core (
     // Engines
     wire in_busy, out_busy, hsh_busy, pmac_busy;
     wire out_secrets_read;
-    wire [8:0] lane_busy;
     wire in_err;
     wire hfail;
 
@@ -96,6 +94,8 @@ module mlkem_core (
     wire [255:0] rho, h, kk, kbar;
     wire rho_v, h_v, kk_v, kbar_v;
 
+    wire hs_wr_rho, hs_wr_h;
+    wire [255:0] hs_wr_val;
     wire nz_we;
     wire [3:0] nz_lane;
     wire [4:0] nz_addr;
@@ -122,29 +122,27 @@ module mlkem_core (
     wire [2:0] out_rd_slot;
     wire [4:0] out_rd_blk, out_rd_blk_c, out_rd_blk_b;
 
-    reg [255:0] mprime;
+    // m' (Decaps) is kept in seed_a, which Decaps does not use.
     reg [8:0] mp_cnt;
     wire mprime_v = mp_cnt[8];
 
-    // Lane arrays
+    // Lane context arrays
+    localparam integer NENG = 2;    // shared NTT engines
+    // Fixed engine of each logical lane (lane 8: either), see the dispatcher
+    localparam [8:0] LMASK0 = 9'b1_0110_1001;
+    localparam [8:0] LMASK1 = 9'b1_1001_0110;
     wire [95:0] l_pm_rdata [0:8];
     wire [5:0] l_b_fill [0:8];
     wire [8:0] l_b_ep;
-    wire [8:0] l_s_we;
-    wire [7:0] l_s_idx [0:8];
-    wire [11:0] l_s_data [0:8];
-    wire [8:0] l_s_first;
-    wire [8:0] l_s_last;
-    wire [8:0] l_c_rreq;
-    wire [4:0] l_c_rblk [0:8];
-    wire [8:0] l_c_we;
-    wire [7:0] l_c_widx [0:8];
-    wire [10:0] l_c_wdata [0:8];
-    wire [8:0] l_c_first;
-    wire [8:0] l_c_last;
-    wire [7:0] l_mu_idx [0:8];
-    wire [8:0] l_mp_we;
-    wire [8:0] l_diff;
+    // S / C store ports of the engines, by the slot of their current job
+    reg [3:0] es_we;
+    reg [5:0] es_idx [0:3];
+    reg [47:0] es_data [0:3];
+    reg [3:0] es_first, es_last;
+    reg [4:0] ec_we, ec_first, ec_last;
+    reg [4:0] ec_rblk [0:4];
+    reg [5:0] ec_widx [0:4];
+    reg [43:0] ec_wdata [0:4];
 
     // Stores
     // Store port selects, registered (constant during a request).
@@ -175,7 +173,7 @@ module mlkem_core (
         for (g = 0; g < 4; g = g + 1) begin : g_st
             // S: Decaps s^ from the input, KeyGen s^ from vector lane g.
             wire s_in = st_we_s[g];
-            wire s_ln = l_s_we[g];
+            wire s_ln = es_we[g];
             reg [7:0] s_we;
             reg [4:0] s_wa;
             reg [95:0] s_wd;
@@ -190,23 +188,23 @@ module mlkem_core (
                 end else if (s_in) begin
                     s_we = 8'hFF;
                 end else if (s_ln) begin
-                    s_we = 8'd1 << l_s_idx[g][2:0];
-                    s_wa = l_s_idx[g][7:3];
-                    s_wd = {8{l_s_data[g]}};
+                    s_we = es_idx[g][0] ? 8'hF0 : 8'h0F;
+                    s_wa = es_idx[g][5:1];
+                    s_wd = {2{es_data[g]}};
                 end
             end
+            // One read port: the output engine reads S only in KeyGen, the
+            // PMAC only in Decaps.
             mlkem_poly_ram #(.W(12), .AW(5)) u_s (
                 .clk(clk), .we(s_we), .waddr({8{s_wa}}), .wdata(s_wd),
-                .raddr(pm_s_blk), .rdata(s_rd[g]));
-            mlkem_poly_ram #(.W(12), .AW(5)) u_s_o (
-                .clk(clk), .we(s_we), .waddr({8{s_wa}}), .wdata(s_wd),
-                .raddr(out_rd_blk), .rdata(s_rd_o[g]));
+                .raddr(is_kg ? out_rd_blk : pm_s_blk), .rdata(s_rd[g]));
+            assign s_rd_o[g] = s_rd[g];
             wire s_ep_unused;
             mlkem_slot_state u_s_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first(s_in ? st_first : (s_ln && l_s_first[g])),
+                .first(s_in ? st_first : (s_ln && es_first[g])),
                 .first_ep(1'b0),
-                .inc(s_in || (s_ln && l_s_last[g])),
+                .inc(s_in || (s_ln && es_last[g])),
                 .fill(s_fill[g]), .ep(s_ep_unused));
 
             // T: t^ from the input, or KeyGen t^ from the PMAC (even rows on
@@ -215,14 +213,13 @@ module mlkem_core (
             wire t_pm = pm_wr_t_en[g];
             wire [95:0] t_pm_data = (g % 2 == 0) ? pm_wr0_data : pm_wr1_data;
             wire t_ep_unused;
+            // One read port: the output engine reads T only in KeyGen (the
+            // PMAC writes it then), the PMAC only in Encaps / Decaps.
             mlkem_poly_ram #(.W(12), .AW(5)) u_t (
                 .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
                 .wdata(t_pm ? t_pm_data : st_data),
-                .raddr(pm_t_blk), .rdata(t_rd[g]));
-            mlkem_poly_ram #(.W(12), .AW(5)) u_t_o (
-                .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
-                .wdata(t_pm ? t_pm_data : st_data),
-                .raddr(out_rd_blk), .rdata(t_rd_o[g]));
+                .raddr(is_kg ? out_rd_blk : pm_t_blk), .rdata(t_rd[g]));
+            assign t_rd_o[g] = t_rd[g];
             mlkem_slot_state u_t_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
                 .first((t_in && st_first) || (t_pm && pm_wr_first)),
@@ -232,10 +229,9 @@ module mlkem_core (
 
         for (g = 0; g < 5; g = g + 1) begin : g_c
             // C: compressed u (slots 0..3) and v (slot 4).
-            localparam integer WL = (g < 4) ? 4 + g : 8;
             wire c_in = st_we_c[g];
-            wire c_ln = l_c_we[WL];
-            wire [4:0] c_rblk = (g < 4) ? (l_c_rreq[WL] ? l_c_rblk[WL] : l_c_rblk[g]) : l_c_rblk[8];
+            wire c_ln = ec_we[g];
+            wire [4:0] c_rblk = ec_rblk[g];
             reg [7:0] c_we;
             reg [4:0] c_wa;
             reg [87:0] c_wd;
@@ -248,46 +244,113 @@ module mlkem_core (
                 if (c_in) begin
                     c_we = 8'hFF;
                 end else if (c_ln) begin
-                    c_we = 8'd1 << l_c_widx[WL][2:0];
-                    c_wa = l_c_widx[WL][7:3];
-                    c_wd = {8{l_c_wdata[WL]}};
+                    c_we = ec_widx[g][0] ? 8'hF0 : 8'h0F;
+                    c_wa = ec_widx[g][5:1];
+                    c_wd = {2{ec_wdata[g]}};
                 end
             end
+            // One read port: the output engine reads C only in Encaps (the
+            // engines write it then), the engines only in Decaps.
             mlkem_poly_ram #(.W(11), .AW(5)) u_c (
                 .clk(clk), .we(c_we), .waddr({8{c_wa}}), .wdata(c_wd),
-                .raddr(c_rblk), .rdata(c_rd[g]));
-            mlkem_poly_ram #(.W(11), .AW(5)) u_c_o (
-                .clk(clk), .we(c_we), .waddr({8{c_wa}}), .wdata(c_wd),
-                .raddr(out_rd_blk_c), .rdata(c_rd_o[g]));
+                .raddr(is_enc ? out_rd_blk_c : c_rblk), .rdata(c_rd[g]));
+            assign c_rd_o[g] = c_rd[g];
             wire c_ep_unused;
             mlkem_slot_state u_c_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first(c_in ? st_first : (c_ln && l_c_first[WL])),
+                .first(c_in ? st_first : (c_ln && ec_first[g])),
                 .first_ep(1'b0),
-                .inc(c_in || (c_ln && l_c_last[WL])),
+                .inc(c_in || (c_ln && ec_last[g])),
                 .fill(c_fill[g]), .ep(c_ep_unused));
         end
     endgenerate
 
-    // Lanes
-    // Message bit of the coefficient the scalar lane unloads, registered
-    // (the lane sends the index one cycle ahead).
-    wire [255:0] mu_bits = is_enc ? seed_a : mprime;
-    reg mu_bit_reg;
-    always @(posedge clk)
-        mu_bit_reg <= mu_bits[l_mu_idx[8]];
-    wire [3:0] l_v_ep;
+    // Lanes: nine logical lanes (contexts: noise memory and buffer) served
+    // by NENG shared NTT engines. A job of a logical lane is dispatched to a
+    // free engine once its load source has its first block; the engine then
+    // runs it to completion (load, transform, unload).
+    wire [4:0] x_nz_cnt [0:8];
+    wire [63:0] x_nz_rdata [0:8];
+    wire [95:0] x_e_rdata [0:8];
+    wire [8:0] x_busy;
+
+    wire [NENG-1:0] e_busy;
+    wire [3:0] e_lid [0:NENG-1];
+    wire [2:0] e_cslot [0:NENG-1];
+    wire [4:0] e_nz_raddr [0:NENG-1];
+    wire [4:0] e_b_rblk [0:NENG-1];
+    wire [NENG-1:0] e_b_we;
+    wire [5:0] e_b_widx [0:NENG-1];
+    wire [47:0] e_b_wdata [0:NENG-1];
+    wire [NENG-1:0] e_b_first, e_b_last, e_b_wep;
+    wire [NENG-1:0] e_s_we;
+    wire [5:0] e_s_idx [0:NENG-1];
+    wire [47:0] e_s_data [0:NENG-1];
+    wire [NENG-1:0] e_s_first, e_s_last;
+    wire [NENG-1:0] e_c_rreq;
+    wire [4:0] e_c_rblk [0:NENG-1];
+    wire [NENG-1:0] e_c_we;
+    wire [5:0] e_c_widx [0:NENG-1];
+    wire [43:0] e_c_wdata [0:NENG-1];
+    wire [NENG-1:0] e_c_first, e_c_last;
+    wire [5:0] e_mu_idx [0:NENG-1];
+    wire [NENG-1:0] e_mp_we;
+    wire [NENG-1:0] e_diff;
+
+    // Lane and C slot of each engine's job, one-hot, registered with the job
+    // start (as the engine's lid): the selects below need no compare.
+    reg [8:0] lsel [0:NENG-1];
+    reg [4:0] csel [0:NENG-1];
+
+    // Engine port of each context: the engine whose current job is this lane.
+    // Read addresses pass straight through; the unload writes are registered
+    // (the fill moves with them, so readers see the same order).
+    reg [4:0] x_nz_raddr [0:8];
+    reg [4:0] x_e_rblk [0:8];
+    reg [8:0] x_e_we, x_e_first, x_e_last, x_e_ep;
+    reg [5:0] x_e_widx [0:8];
+    reg [47:0] x_e_wdata [0:8];
+    integer xe, xl;
+    always @(*) begin
+        for (xl = 0; xl < 9; xl = xl + 1) begin
+            x_nz_raddr[xl] = 5'd0;
+            x_e_rblk[xl] = 5'd0;
+            for (xe = 0; xe < NENG; xe = xe + 1)
+                if (((xe == 0) ? LMASK0[xl] : LMASK1[xl]) && (xl != 8 || lsel[xe][8])) begin
+                    x_nz_raddr[xl] = e_nz_raddr[xe];
+                    x_e_rblk[xl] = e_b_rblk[xe];
+                end
+        end
+    end
+    always @(*) begin
+        for (xl = 0; xl < 9; xl = xl + 1) begin
+            x_e_we[xl] = 1'b0;
+            x_e_first[xl] = 1'b0;
+            x_e_last[xl] = 1'b0;
+            x_e_ep[xl] = 1'b0;
+            x_e_widx[xl] = 6'd0;
+            x_e_wdata[xl] = 48'd0;
+            for (xe = 0; xe < NENG; xe = xe + 1)
+                if (((xe == 0) ? LMASK0[xl] : LMASK1[xl]) && (xl != 8 || lsel[xe][8])) begin
+                    x_e_we[xl] = e_b_we[xe] && lsel[xe][xl];
+                    x_e_first[xl] = e_b_first[xe];
+                    x_e_last[xl] = e_b_last[xe];
+                    x_e_ep[xl] = e_b_wep[xe];
+                    x_e_widx[xl] = e_b_widx[xe];
+                    x_e_wdata[xl] = e_b_wdata[xe];
+                end
+        end
+    end
 
     generate
-        for (g = 0; g < 9; g = g + 1) begin : g_lane
-            localparam integer CS = (g < 4) ? g : ((g < 8) ? g - 4 : 4);
-            wire [4:0] pm_rblk = (g < 4) ? pm_v_blk : out_rd_blk_b;
+        for (g = 0; g < 9; g = g + 1) begin : g_ctx
             // PMAC result write: row lanes take one port each (even rows
             // port 0, odd rows port 1), the scalar lane takes either; the
             // vector lanes are never written.
             wire pm_w;
             wire [95:0] pm_wdata;
             wire pm_wep;
+            wire [4:0] pm_rblk = (g < 4) ? pm_v_blk : out_rd_blk_b;
             if (g < 4) begin : g_pm_none
                 assign pm_w = 1'b0;
                 assign pm_wdata = 96'd0;
@@ -301,14 +364,207 @@ module mlkem_core (
                 assign pm_wdata = pm_wr8_p1 ? pm_wr1_data : pm_wr0_data;
                 assign pm_wep = pm_wr8_ep;
             end
-            // C store block; the scalar lane's bus also carries the message bit.
-            wire [((g == 8) ? 88 : 87):0] c_rbus;
-            if (g == 8) begin : g_mu
-                assign c_rbus = {mu_bit_reg, c_rd[CS]};
-            end else begin : g_no_mu
-                assign c_rbus = c_rd[CS];
+            mlkem_lane_ctx #(.LANE(g)) u_ctx (
+                .clk(clk), .rst_n(rst_n), .kill(kill), .go(go), .scrub(scrub),
+                .out_rd(is_kg), .busy(x_busy[g]),
+                .nz_we(nz_we && nz_lane == g), .nz_addr(nz_addr), .nz_wdata(nz_wdata),
+                .nz_cnt(x_nz_cnt[g]), .nz_raddr(x_nz_raddr[g]), .nz_rdata(x_nz_rdata[g]),
+                .pm_rd_blk(pm_rblk), .pm_rd_data(l_pm_rdata[g]),
+                .pm_we(pm_w), .pm_wr_blk(pm_wr_blk), .pm_wr_first(pm_wr_first),
+                .pm_wr_data(pm_wdata), .pm_wr_ep(pm_wep),
+                .e_rblk(x_e_rblk[g]), .e_rdata(x_e_rdata[g]),
+                .e_we(x_e_we[g]), .e_widx(x_e_widx[g]), .e_wdata(x_e_wdata[g]),
+                .e_first(x_e_first[g]), .e_last(x_e_last[g]), .e_ep(x_e_ep[g]),
+                .b_fill(l_b_fill[g]), .b_ep(l_b_ep[g])
+            );
+        end
+    endgenerate
+
+    // Job dispatch. pend: lane has a job waiting; jn: its job number (the
+    // vector and scalar lanes run a second job in Decaps, queued when the
+    // first one completes).
+    reg [8:0] pend;
+    reg [8:0] jn;
+    reg [8:0] rdy_q;
+    reg [NENG-1:0] e_job;              // engine runs a dispatched job
+    reg [NENG-1:0] e_busy_q;
+    reg [NENG-1:0] jst;
+    reg [3:0] jst_lane [0:NENG-1];
+    reg [NENG-1:0] jst_num;
+
+    // The load source of each lane's next job has its first block,
+    // registered. A lane whose job number changes (second job queued) or
+    // whose stores are cleared (go) reads not ready for that cycle, so a
+    // stale answer never dispatches a job early.
+    reg [8:0] rq_clr;
+    integer rl, rc;
+    always @(*) begin
+        rq_clr = 9'd0;
+        for (rc = 0; rc < NENG; rc = rc + 1)
+            if (e_job[rc] && e_busy_q[rc] && !e_busy[rc])
+                rq_clr[e_lid[rc]] = 1'b1;
+    end
+    always @(posedge clk) begin
+        for (rl = 0; rl < 9; rl = rl + 1) begin
+            if (go || launch || rq_clr[rl])
+                rdy_q[rl] <= 1'b0;
+            else if (rl < 4)
+                rdy_q[rl] <= (op_r == `MLKEM_OP_DECAPS && !jn[rl]) ? (c_fill[rl] != 6'd0) : (x_nz_cnt[rl] != 5'd0);
+            else if (rl < 8)
+                rdy_q[rl] <= is_kg ? (x_nz_cnt[rl] != 5'd0) : (!l_b_ep[rl] && l_b_fill[rl] != 6'd0);
+            else
+                rdy_q[rl] <= (l_b_ep[rl] == jn[rl]) && (l_b_fill[rl] != 6'd0);
+        end
+    end
+
+    // Engine of each logical lane: fixed, so every context has one engine
+    // port and every engine reads five contexts (no 9:1 selects). The split
+    // keeps both engines equally loaded for k = 2, 3, 4; the scalar lane runs
+    // on whichever engine is free.
+    //   engine 0: lanes 0, 3, 5, 6 (+ 8)    engine 1: lanes 1, 2, 4, 7 (+ 8)
+    // Pick order within an engine: vector lanes, the rows, the scalar lane
+    // (so the shared scalar job goes to the engine without a row to run)
+    function [4:0] pick;                 // {valid, lane}
+        input [8:0] c;
+        integer pi;
+        begin
+            pick = c[8] ? {1'b1, 4'd8} : 5'd0;
+            for (pi = 7; pi >= 0; pi = pi - 1)
+                if (c[pi])
+                    pick = {1'b1, pi[3:0]};
+        end
+    endfunction
+    wire [8:0] cand = pend & rdy_q;
+    wire e0_free = !e_busy[0] && !jst[0];
+    wire e1_free = !e_busy[1] && !jst[1];
+    wire [4:0] pk0 = e0_free ? pick(cand & LMASK0) : 5'd0;
+    wire [4:0] pk1 = e1_free ? pick(cand & LMASK1 & ((pk0 == {1'b1, 4'd8}) ? 9'h0FF : 9'h1FF)) : 5'd0;
+
+    integer de;
+    always @(posedge clk) begin
+        if (!rst_n || kill) begin
+            pend <= 9'd0;
+            jn <= 9'd0;
+            jst <= {NENG{1'b0}};
+            e_job <= {NENG{1'b0}};
+            e_busy_q <= {NENG{1'b0}};
+            for (de = 0; de < NENG; de = de + 1) begin
+                lsel[de] <= 9'd0;
+                csel[de] <= 5'd0;
             end
-            mlkem_lane #(.LANE(g)) u_lane (
+        end else begin
+            jst <= {NENG{1'b0}};
+            e_busy_q <= e_busy;
+            if (go) begin
+                jn <= 9'd0;
+                for (de = 0; de < 4; de = de + 1) begin
+                    pend[de] <= (de < k_r);
+                    pend[4 + de] <= (de < k_r);
+                end
+                pend[8] <= (op_r != `MLKEM_OP_KEYGEN);
+                e_job <= {NENG{1'b0}};
+            end else begin
+                // Completed jobs: the Decaps vector and scalar lanes queue
+                // their second job.
+                for (de = 0; de < NENG; de = de + 1) begin
+                    if (e_job[de] && e_busy_q[de] && !e_busy[de]) begin
+                        e_job[de] <= 1'b0;
+                        if ((op_r == `MLKEM_OP_DECAPS) && (e_lid[de] < 4'd4 || e_lid[de] == 4'd8) &&
+                            !jn[e_lid[de]]) begin
+                            pend[e_lid[de]] <= 1'b1;
+                            jn[e_lid[de]] <= 1'b1;
+                        end
+                    end
+                end
+                if (pk0[4]) begin
+                    lsel[0] <= 9'd1 << pk0[3:0];
+                    csel[0] <= 5'd1 << ((pk0[3:0] == 4'd8) ? 3'd4 : {1'b0, pk0[1:0]});
+                    jst[0] <= 1'b1;
+                    jst_lane[0] <= pk0[3:0];
+                    jst_num[0] <= jn[pk0[3:0]];
+                    pend[pk0[3:0]] <= 1'b0;
+                    e_job[0] <= 1'b1;
+                end
+                if (pk1[4]) begin
+                    lsel[1] <= 9'd1 << pk1[3:0];
+                    csel[1] <= 5'd1 << ((pk1[3:0] == 4'd8) ? 3'd4 : {1'b0, pk1[1:0]});
+                    jst[1] <= 1'b1;
+                    jst_lane[1] <= pk1[3:0];
+                    jst_num[1] <= jn[pk1[3:0]];
+                    pend[pk1[3:0]] <= 1'b0;
+                    e_job[1] <= 1'b1;
+                end
+            end
+        end
+    end
+
+    // Context ports seen by each engine: its own lanes only
+    reg [63:0] nz_rdata_e [0:NENG-1];
+    reg [4:0] nz_cnt_e [0:NENG-1];
+    reg [95:0] e_rdata_e [0:NENG-1];
+    reg [5:0] l_b_fill_e [0:NENG-1];
+    reg [NENG-1:0] l_b_ep_e;
+    integer me, ml;
+    always @(*) begin
+        for (me = 0; me < NENG; me = me + 1) begin
+            nz_rdata_e[me] = 64'd0;
+            nz_cnt_e[me] = 5'd0;
+            e_rdata_e[me] = 96'd0;
+            for (ml = 0; ml < 9; ml = ml + 1)
+                if (((me == 0) ? LMASK0[ml] : LMASK1[ml]) && lsel[me][ml]) begin
+                    nz_rdata_e[me] = x_nz_rdata[ml];
+                    nz_cnt_e[me] = x_nz_cnt[ml];
+                    e_rdata_e[me] = x_e_rdata[ml];
+                end
+        end
+    end
+
+    // C store block and fill seen by each engine (its job's slot)
+    reg [87:0] c_rd_e [0:NENG-1];
+    integer ce, cs;
+    always @(*) begin
+        for (ce = 0; ce < NENG; ce = ce + 1) begin
+            c_rd_e[ce] = 88'd0;
+            for (cs = 0; cs < 5; cs = cs + 1)
+                if (csel[ce][cs]) begin
+                    c_rd_e[ce] = c_rd_e[ce] | c_rd[cs];
+                end
+        end
+    end
+
+    // Buffer / C store fill and buffer epoch of each engine's job, registered:
+    // fills only grow, so a one-cycle-old value is a safe (conservative)
+    // answer to the engine's load readiness.
+    reg [5:0] c_fill_e [0:NENG-1];
+    integer fe, fl;
+    always @(posedge clk) begin
+        for (fe = 0; fe < NENG; fe = fe + 1) begin
+            l_b_fill_e[fe] <= 6'd0;
+            l_b_ep_e[fe] <= 1'b0;
+            c_fill_e[fe] <= 6'd0;
+            for (fl = 0; fl < 9; fl = fl + 1)
+                if (((fe == 0) ? LMASK0[fl] : LMASK1[fl]) && lsel[fe][fl] && !jst[fe]) begin
+                    l_b_fill_e[fe] <= l_b_fill[fl];
+                    l_b_ep_e[fe] <= l_b_ep[fl];
+                end
+            for (fl = 0; fl < 5; fl = fl + 1)
+                if (csel[fe][fl] && !jst[fe])
+                    c_fill_e[fe] <= c_fill[fl];
+        end
+    end
+
+    // Message bits of the group an engine unloads, registered (the engine
+    // sends the group one cycle ahead).
+    wire [255:0] mu_bits = seed_a;
+    // One index mux: only the engine running the scalar lane reads them.
+    reg [3:0] mu_bit_reg;
+    wire [5:0] mu_idx_sel = (e_lid[0] == 4'd8) ? e_mu_idx[0] : e_mu_idx[1];
+    always @(posedge clk)
+        mu_bit_reg <= mu_bits[4*mu_idx_sel +: 4];
+
+    generate
+        for (g = 0; g < NENG; g = g + 1) begin : g_lane
+            mlkem_lane u_lane (
                 .clk(clk),
                 .rst_n(rst_n),
                 .kill(kill),
@@ -317,45 +573,76 @@ module mlkem_core (
                 .zero_core(zero_core),
                 .op(op_r),
                 .k(k_r),
-                .busy(lane_busy[g]),
-                .nz_we(nz_we && nz_lane == g),
-                .nz_addr(nz_addr),
-                .nz_wdata(nz_wdata),
-                .pm_rd_blk(pm_rblk),
-                .pm_rd_data(l_pm_rdata[g]),
-                .pm_we(pm_w),
-                .pm_wr_blk(pm_wr_blk),
-                .pm_wr_first(pm_wr_first),
-                .pm_wr_data(pm_wdata),
-                .pm_wr_ep(pm_wep),
-                .b_fill(l_b_fill[g]),
-                .b_ep(l_b_ep[g]),
-                .s_we(l_s_we[g]),
-                .s_idx(l_s_idx[g]),
-                .s_data(l_s_data[g]),
-                .s_first(l_s_first[g]),
-                .s_last(l_s_last[g]),
-                .c_rreq(l_c_rreq[g]),
-                .c_rblk(l_c_rblk[g]),
-                .c_rdata(c_rbus),
-                .c_fill(c_fill[CS]),
-                .c_we(l_c_we[g]),
-                .c_widx(l_c_widx[g]),
-                .c_wdata(l_c_wdata[g]),
-                .c_first(l_c_first[g]),
-                .c_last(l_c_last[g]),
-                .mu_idx(l_mu_idx[g]),
-                .mp_we(l_mp_we[g]),
-                .diff(l_diff[g])
+                .busy(e_busy[g]),
+                .jstart(jst[g]),
+                .jlane(jst_lane[g]),
+                .jnum(jst_num[g]),
+                .lid(e_lid[g]),
+                .cslot(e_cslot[g]),
+                .nz_raddr(e_nz_raddr[g]),
+                .nz_rdata(nz_rdata_e[g]),
+                .nz_cnt(nz_cnt_e[g]),
+                .b_rblk(e_b_rblk[g]),
+                .b_rdata(e_rdata_e[g]),
+                .b_fill(l_b_fill_e[g]),
+                .b_ep(l_b_ep_e[g]),
+                .b_we(e_b_we[g]),
+                .b_widx(e_b_widx[g]),
+                .b_wdata(e_b_wdata[g]),
+                .b_first(e_b_first[g]),
+                .b_last(e_b_last[g]),
+                .b_wep(e_b_wep[g]),
+                .s_we(e_s_we[g]),
+                .s_idx(e_s_idx[g]),
+                .s_data(e_s_data[g]),
+                .s_first(e_s_first[g]),
+                .s_last(e_s_last[g]),
+                .c_rreq(e_c_rreq[g]),
+                .c_rblk(e_c_rblk[g]),
+                .c_rdata({mu_bit_reg, c_rd_e[g]}),
+                .c_fill(c_fill_e[g]),
+                .c_we(e_c_we[g]),
+                .c_widx(e_c_widx[g]),
+                .c_wdata(e_c_wdata[g]),
+                .c_first(e_c_first[g]),
+                .c_last(e_c_last[g]),
+                .mu_idx(e_mu_idx[g]),
+                .mp_we(e_mp_we[g]),
+                .diff(e_diff[g])
             );
         end
     endgenerate
 
-    assign l_v_ep = l_b_ep[3:0];
+    // S / C store writes of the engines (one-hot selects, no compare); C
+    // read addresses: the engine whose job reads that slot.
+    always @(*) begin
+        for (xl = 0; xl < 4; xl = xl + 1) begin
+            es_we[xl] = (e_s_we[0] && lsel[0][xl]) || (e_s_we[1] && lsel[1][xl]);
+            es_idx[xl] = lsel[1][xl] ? e_s_idx[1] : e_s_idx[0];
+            es_data[xl] = lsel[1][xl] ? e_s_data[1] : e_s_data[0];
+            es_first[xl] = lsel[1][xl] ? e_s_first[1] : e_s_first[0];
+            es_last[xl] = lsel[1][xl] ? e_s_last[1] : e_s_last[0];
+        end
+        for (xl = 0; xl < 5; xl = xl + 1) begin
+            ec_we[xl] = (e_c_we[0] && csel[0][xl]) || (e_c_we[1] && csel[1][xl]);
+            ec_widx[xl] = (e_c_we[1] && csel[1][xl]) ? e_c_widx[1] : e_c_widx[0];
+            ec_wdata[xl] = (e_c_we[1] && csel[1][xl]) ? e_c_wdata[1] : e_c_wdata[0];
+            ec_first[xl] = (e_c_we[1] && csel[1][xl]) ? e_c_first[1] : e_c_first[0];
+            ec_last[xl] = (e_c_we[1] && csel[1][xl]) ? e_c_last[1] : e_c_last[0];
+        end
+    end
+    always @(*) begin
+        for (xl = 0; xl < 5; xl = xl + 1)
+            ec_rblk[xl] = (csel[1][xl] && e_c_rreq[1]) ? e_c_rblk[1] : e_c_rblk[0];
+    end
+
+    wire [3:0] l_v_ep = l_b_ep[3:0];
 
     // Input
     mlkem_in u_in (
         .clk(clk), .rst_n(rst_n), .kill(kill), .go(go), .scrub(scrub_r),
+        .ext_rho_we(hs_wr_rho), .ext_h_we(hs_wr_h), .ext_val(hs_wr_val),
+        .ext_z_we(seed_we[15:8]), .ext_z_wdata(seed_wdata), .z_clr(seed_clr || tstate == DONE),
         .op(op_r), .k(k_r), .busy(in_busy),
         .s_tdata(in_data), .s_tvalid(in_valid), .s_tready(in_ready),
         .fifo_push(fifo_push_in), .fifo_din(fifo_din_in), .fifo_full(fifo_full),
@@ -381,9 +668,10 @@ module mlkem_core (
         .rho_in(in_rho), .rho_in_v(in_rho_v),
         .h_in(in_h), .h_in_v(in_h_v),
         .z_in(in_z), .z_in_v(in_z_v),
-        .mprime(mprime), .mprime_v(mprime_v),
+        .mprime(seed_a), .mprime_v(mprime_v),
         .fifo_data(fifo_dout), .fifo_empty(fifo_empty), .fifo_pop(fifo_pop),
         .rho(rho), .rho_v(rho_v), .h(h), .h_v(h_v),
+        .wr_rho(hs_wr_rho), .wr_h(hs_wr_h), .wr_val(hs_wr_val),
         .kk(kk), .kk_v(kk_v), .kbar(kbar), .kbar_v(kbar_v), .hfail(hfail),
         .nz_we(nz_we), .nz_lane(nz_lane), .nz_addr(nz_addr), .nz_wdata(nz_wdata),
         .smp_load(smp_load), .smp_new(smp_new), .smp_slot(smp_slot), .cap(cap),
@@ -415,10 +703,11 @@ module mlkem_core (
     );
 
     // Output
-    wire diff_any = |l_diff[8:4];
+    wire diff_any = |e_diff;
     reg lanes_idle;
     always @(posedge clk)
-        lanes_idle <= (lane_busy == 9'd0);
+        lanes_idle <= (e_busy == {NENG{1'b0}}) && (x_busy == 9'd0) && (pend == 9'd0) &&
+                      (jst == {NENG{1'b0}}) && (e_job == {NENG{1'b0}});
     wire fin_v = (op_r == `MLKEM_OP_DECAPS) && computed && kbar_v && kk_v;
     wire [255:0] k_final = diff_any ? kbar : kk;
     reg [5:0] out_rd_fill;
@@ -440,36 +729,39 @@ module mlkem_core (
         .bias_data(l_pm_rdata[4 + out_rd_slot[1:0]]),
         .bias_fill(l_b_fill[4 + out_rd_slot[1:0]]),
         .bias_ep(l_b_ep[4 + out_rd_slot[1:0]]),
-        .rho(rho), .rho_v(rho_v), .h(h), .h_v(h_v), .z(seed_z),
+        .rho(rho), .rho_v(rho_v), .h(h), .h_v(h_v), .z(in_z),
         .key(is_enc ? kk : k_final), .key_v(is_enc ? kk_v : fin_v),
         .fifo_push(fifo_push_out), .fifo_din(fifo_din_out), .fifo_full(fifo_full),
         .m_tdata(out_data), .m_tvalid(out_valid), .m_tready(out_ready)
     );
 
     // Seed words: written while ready, cleared with DONE and by seed_clr
-    integer sw;
+    // (z is held in the input engine's z register, shared with Decaps.)
+    // seed_a also receives m' in Decaps, four bits per scalar group.
+    integer sw, mpe;
     always @(posedge clk) begin
         if (seed_clr || tstate == DONE) begin
             seed_a <= 256'd0;
-            seed_z <= 256'd0;
         end else begin
-            for (sw = 0; sw < 8; sw = sw + 1) begin
+            for (sw = 0; sw < 8; sw = sw + 1)
                 if (seed_we[sw])
                     seed_a[32*sw +: 32] <= seed_wdata;
-                if (seed_we[8+sw])
-                    seed_z[32*sw +: 32] <= seed_wdata;
-            end
+            for (mpe = 0; mpe < NENG; mpe = mpe + 1)
+                if (e_mp_we[mpe])
+                    seed_a[4*e_c_widx[mpe] +: 4] <= {e_c_wdata[mpe][33], e_c_wdata[mpe][22],
+                                                     e_c_wdata[mpe][11], e_c_wdata[mpe][0]};
         end
     end
 
     // M' register
+    integer mpc;
     always @(posedge clk) begin
         if (!rst_n || go || scrub_r) begin
-            mprime <= 256'd0;
             mp_cnt <= 9'd0;
-        end else if (l_mp_we[8]) begin
-            mprime[l_c_widx[8]] <= l_c_wdata[8][0];
-            mp_cnt <= mp_cnt + 9'd1;
+        end else begin
+            for (mpc = 0; mpc < NENG; mpc = mpc + 1)
+                if (e_mp_we[mpc])
+                    mp_cnt <= mp_cnt + 9'd4;
         end
     end
 
