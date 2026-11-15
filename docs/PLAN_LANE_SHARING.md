@@ -19,18 +19,20 @@ Default synthesis and implementation flow (`opt`, `place`, `phys_opt`,
 
 | Build | LUT | of which memory | FF | Slices | WNS | Fmax | Power (vectorless) |
 |-------|-----|-----------------|----|--------|-----|------|--------------------|
-| 4 ns (step 5) | 31,120 | 4,972 | 19,426 | 9,475 | +0.004 ns | 250.3 MHz | 1.98 W |
+| 4 ns (step 5) | 31,430 | 4,972 | 19,429 | 9,415 | +0.004 ns | 250.3 MHz | 1.97 W |
 | 5 ns (step 4) | 30,660 | 4,971 | 19,171 | 9,361 | +0.067 ns | 202.7 MHz | 1.59 W |
 
 Core cycles (`make perf`; the AXI top adds 2) and µs at 250 MHz:
 
 | Set  | KeyGen        | Encaps        | Decaps         | Paper 15 (µs)      | Paper 13 (µs)      |
 |------|---------------|---------------|----------------|--------------------|--------------------|
-| 512  | 1277 (5.11)   | 1891 (7.56)   | 2657 (10.63)   | 6.7 / 9.9 / 13.7   | 8.1 / 12.1 / 18.0  |
-| 768  | 1813 (7.25)   | 2537 (10.15)  | 3853 (15.41)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
-| 1024 | 2605 (10.42)  | 3380 (13.52)  | 4711 (18.84)   | 19.3 / 22.6 / 28.7 | 20.7 / 27.4 / 36.0 |
+| 512  | 1277 (5.11)   | 1803 (7.21)   | 2657 (10.63)   | 6.7 / 9.9 / 13.7   | 8.1 / 12.1 / 18.0  |
+| 768  | 1813 (7.25)   | 2398 (9.59)   | 3853 (15.41)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
+| 1024 | 2605 (10.42)  | 3190 (12.76)  | 4543 (18.17)   | 19.3 / 22.6 / 28.7 | 20.7 / 27.4 / 36.0 |
 
-Every point is 22-46 % faster than Paper 15 and 37-51 % faster than Paper 13.
+Every point is 22-46 % faster than Paper 15 and 37-53 % faster than Paper 13
+(Decaps-512 / 768, about 22 %, are bound by the two engines: one of them runs
+three transforms in a row in the re-encryption).
 AT and power stay above Paper 15 (4 DSP, 270 MHz); with 0 DSP / 0 BRAM the
 multipliers and the stores are LUTs.
 
@@ -161,6 +163,18 @@ and the reader's register (three long nets in one cycle). Changes:
   at most, the FIFO holds 256).
 - Lane-to-engine map 0, 2, 5, 7 / 1, 3, 4, 6: for k = 3 the third vector NTT
   no longer waits behind the second on one engine (ML-KEM-768 -1.6..1.8 %).
+- Long jobs (H(ek), J) collect their words in `cap` (free then: the sampler
+  and the noise writer are done with it; cleared by a registered strobe on
+  the register reset) while the previous block permutes, and absorb the
+  block in one handshake; the word-XOR path of the sponge is gone. Encaps
+  -4.7..5.6 %, Decaps-1024 -3.6 %, no flip-flops added (step 3 had removed
+  `msg_block` and lost this overlap).
+- Cross-module controls registered at the reader: the FIFO full (the FIFO
+  rises it with two words free), the output engine's register-word valid
+  flags and the Decaps key valid, the input accept-left flag; the
+  re-encryption compare in two steps; the PMAC's next block of a pair
+  computed at the group start; the precount's sums rebalanced (four counts
+  of 7 per sum).
 
 Cycles change by 0..0.6% (result table at the top).
 
