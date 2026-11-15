@@ -19,7 +19,7 @@ Default synthesis and implementation flow (`opt`, `place`, `phys_opt`,
 
 | Build | LUT | of which memory | FF | Slices | WNS | Fmax | Power (vectorless) |
 |-------|-----|-----------------|----|--------|-----|------|--------------------|
-| 4 ns (step 5) | 31,050 | 4,972 | 19,454 | 9,466 | +0.012 ns | 250.8 MHz | 1.97 W |
+| 4 ns (step 5) | 31,120 | 4,972 | 19,426 | 9,475 | +0.004 ns | 250.3 MHz | 1.98 W |
 | 5 ns (step 4) | 30,660 | 4,971 | 19,171 | 9,361 | +0.067 ns | 202.7 MHz | 1.59 W |
 
 Core cycles (`make perf`; the AXI top adds 2) and µs at 250 MHz:
@@ -27,7 +27,7 @@ Core cycles (`make perf`; the AXI top adds 2) and µs at 250 MHz:
 | Set  | KeyGen        | Encaps        | Decaps         | Paper 15 (µs)      | Paper 13 (µs)      |
 |------|---------------|---------------|----------------|--------------------|--------------------|
 | 512  | 1277 (5.11)   | 1891 (7.56)   | 2657 (10.63)   | 6.7 / 9.9 / 13.7   | 8.1 / 12.1 / 18.0  |
-| 768  | 1842 (7.37)   | 2566 (10.26)  | 3922 (15.69)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
+| 768  | 1813 (7.25)   | 2537 (10.15)  | 3853 (15.41)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
 | 1024 | 2605 (10.42)  | 3380 (13.52)  | 4711 (18.84)   | 19.3 / 22.6 / 28.7 | 20.7 / 27.4 / 36.0 |
 
 Every point is 22-46 % faster than Paper 15 and 37-51 % faster than Paper 13.
@@ -99,7 +99,8 @@ Step 2 as built:
 - S, T, C stores and row buffers: one LUTRAM copy each, read address chosen
   by the operation (the output engine and the compute side never read the
   same store in one operation).
-- Fixed lane-to-engine map (engine 0: lanes 0, 3, 5, 6; engine 1: 1, 2, 4, 7;
+- Fixed lane-to-engine map (engine 0: lanes 0, 3, 5, 6; engine 1: 1, 2, 4, 7,
+  later 0, 2, 5, 7 / 1, 3, 4, 6, see step 5;
   lane 8 either; pick order vector, row, scalar): 5:1 context selects.
 - PMAC results scaled at the PMAC output (`mlkem_scale`) instead of the
   vector operands in both engines; Decaps re-encryption takes the v row first.
@@ -158,6 +159,8 @@ and the reader's register (three long nets in one cycle). Changes:
   PMAC `g1_cur` registered with the group; AXI buffer address one register
   per byte lane; the KeyGen ek tap no longer waits for FIFO room (196 words
   at most, the FIFO holds 256).
+- Lane-to-engine map 0, 2, 5, 7 / 1, 3, 4, 6: for k = 3 the third vector NTT
+  no longer waits behind the second on one engine (ML-KEM-768 -1.6..1.8 %).
 
 Cycles change by 0..0.6% (result table at the top).
 
