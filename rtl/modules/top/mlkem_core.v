@@ -130,8 +130,8 @@ module mlkem_core (
     // Lane context arrays
     localparam integer NENG = 2;    // shared NTT engines
     // Fixed engine of each logical lane (lane 8: either), see the dispatcher
-    localparam [8:0] LMASK0 = 9'b1_0110_1001;
-    localparam [8:0] LMASK1 = 9'b1_1001_0110;
+    localparam [8:0] LMASK0 = 9'b1_1010_0101;
+    localparam [8:0] LMASK1 = 9'b1_0101_1010;
     wire [95:0] l_pm_rdata [0:8];
     wire [5:0] l_b_fill [0:8];
     wire [8:0] l_b_ep;
@@ -424,10 +424,12 @@ module mlkem_core (
     end
 
     // Engine of each logical lane: fixed, so every context has one engine
-    // port and every engine reads five contexts (no 9:1 selects). The split
-    // keeps both engines equally loaded for k = 2, 3, 4; the scalar lane runs
-    // on whichever engine is free.
-    //   engine 0: lanes 0, 3, 5, 6 (+ 8)    engine 1: lanes 1, 2, 4, 7 (+ 8)
+    // port and every engine reads five contexts (no 9:1 selects). The vector
+    // lanes and the rows alternate between the engines, the rows the other
+    // way round, so each phase (vector NTTs, row INTTs) is split evenly for
+    // k = 2, 3, 4 and for k = 3 the extra vector and the extra row run on
+    // different engines; the scalar lane runs on whichever engine is free.
+    //   engine 0: lanes 0, 2, 5, 7 (+ 8)    engine 1: lanes 1, 3, 4, 6 (+ 8)
     // Pick order within an engine: vector lanes, the rows, the scalar lane
     // (so the shared scalar job goes to the engine without a row to run),
     // i.e. the lowest candidate lane; picks are one-hot, like lsel.
