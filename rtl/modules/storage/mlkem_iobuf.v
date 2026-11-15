@@ -101,8 +101,9 @@ module mlkem_iobuf #(
         end
     endfunction
 
-    // RAM and its registered port
-    reg [WA-1:0] a_q;
+    // RAM and its registered port. The address is held in one register per
+    // byte lane (kept), so each lane's memory sees its own copy.
+    (* keep = "true" *) reg [8*WA-1:0] a_q;
     reg [7:0] we_q;
     reg [63:0] wd_q;
     wire [63:0] rd;
@@ -296,22 +297,22 @@ module mlkem_iobuf #(
     // RAM port: AXI beats, then the wipe, then the writer, then the reader
     always @(posedge clk) begin
         if (w_fire && beat_ok) begin
-            a_q <= x_addr[ADDR_W-1:3];
+            a_q <= {8{x_addr[ADDR_W-1:3]}};
             we_q <= s_axi_wstrb;
             wd_q <= s_axi_wdata;
         end else if (r_go && beat_ok) begin
-            a_q <= x_addr[ADDR_W-1:3];
+            a_q <= {8{x_addr[ADDR_W-1:3]}};
             we_q <= 8'h00;
         end else if (wipe_go) begin
-            a_q <= wptr;
+            a_q <= {8{wptr}};
             we_q <= 8'hFF;
             wd_q <= 64'd0;
         end else if (o_go) begin
-            a_q <= wptr;
+            a_q <= {8{wptr}};
             we_q <= 8'hFF;
             wd_q <= out_data;
         end else if (i_go) begin
-            a_q <= rptr;
+            a_q <= {8{rptr}};
             we_q <= 8'h00;
         end else begin
             we_q <= 8'h00;
