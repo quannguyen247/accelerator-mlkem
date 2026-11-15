@@ -1,5 +1,5 @@
 # Creates project/mlkem_top/mlkem_top.xpr: standalone out-of-context build of
-# the IP top (mlkem_axi) with the 5 ns clock of constraint/mlkem.xdc. On 7-series
+# the IP top (mlkem_axi) with the 4 ns clock of constraint/mlkem.xdc. On 7-series
 # parts constraint/mlkem_ooc.xdc adds the clock source and partition pins of
 # the out-of-context implementation (Artix-7 XC7A200T-3 by default).
 #   vivado -mode batch -source scripts/create_project.tcl -tclargs [part]
