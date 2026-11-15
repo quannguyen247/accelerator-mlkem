@@ -149,9 +149,11 @@ module mlkem_core (
     // Store port selects, registered (constant during a request).
     reg is_kg;
     reg is_enc;
+    reg is_dec;
     always @(posedge clk) begin
         is_kg <= (op_r == `MLKEM_OP_KEYGEN);
         is_enc <= (op_r == `MLKEM_OP_ENCAPS);
+        is_dec <= (op_r == `MLKEM_OP_DECAPS);
     end
     // sc counts 0..32 in WAIT only (it is 32 in every other state), so its
     // top bit alone tells whether the stores are being cleared.
@@ -415,7 +417,7 @@ module mlkem_core (
             if (go || launch || rq_clr[rl])
                 rdy_q[rl] <= 1'b0;
             else if (rl < 4)
-                rdy_q[rl] <= (op_r == `MLKEM_OP_DECAPS && !jn[rl]) ? (c_fill[rl] != 6'd0) : (x_nz_cnt[rl] != 5'd0);
+                rdy_q[rl] <= (is_dec && !jn[rl]) ? (c_fill[rl] != 6'd0) : (x_nz_cnt[rl] != 5'd0);
             else if (rl < 8)
                 rdy_q[rl] <= is_kg ? (x_nz_cnt[rl] != 5'd0) : (!l_b_ep[rl] && l_b_fill[rl] != 6'd0);
             else
@@ -487,7 +489,7 @@ module mlkem_core (
                     pend[de] <= (de < k_r);
                     pend[4 + de] <= (de < k_r);
                 end
-                pend[8] <= (op_r != `MLKEM_OP_KEYGEN);
+                pend[8] <= !is_kg;
                 e_job <= {NENG{1'b0}};
             end else begin
                 // Completed jobs: the Decaps vector and scalar lanes queue
@@ -495,7 +497,7 @@ module mlkem_core (
                 for (de = 0; de < NENG; de = de + 1) begin
                     if (e_job[de] && e_busy_q[de] && !e_busy[de]) begin
                         e_job[de] <= 1'b0;
-                        if ((op_r == `MLKEM_OP_DECAPS) && (e_lid[de] < 4'd4 || e_lid[de] == 4'd8) &&
+                        if (is_dec && (e_lid[de] < 4'd4 || e_lid[de] == 4'd8) &&
                             !jn[e_lid[de]]) begin
                             pend[e_lid[de]] <= 1'b1;
                             jn[e_lid[de]] <= 1'b1;
@@ -528,7 +530,15 @@ module mlkem_core (
         end
     end
 
-    // Context ports seen by each engine: its own lanes only
+    // Context ports seen by each engine: its own lanes only. The read
+    // selects use lsel_r, a copy of lsel one cycle later without an enable:
+    // an engine reads its lane's context from the cycle after its job start
+    // (LDW), so the wide read muxes see a plain register.
+    reg [8:0] lsel_r [0:NENG-1];
+    integer lr;
+    always @(posedge clk)
+        for (lr = 0; lr < NENG; lr = lr + 1)
+            lsel_r[lr] <= lsel[lr];
     reg [63:0] nz_rdata_e [0:NENG-1];
     reg [4:0] nz_cnt_e [0:NENG-1];
     reg [95:0] e_rdata_e [0:NENG-1];
@@ -540,21 +550,27 @@ module mlkem_core (
             nz_rdata_e[me] = 64'd0;
             e_rdata_e[me] = 96'd0;
             for (ml = 0; ml < 9; ml = ml + 1)
-                if (((me == 0) ? LMASK0[ml] : LMASK1[ml]) && lsel[me][ml]) begin
+                if (((me == 0) ? LMASK0[ml] : LMASK1[ml]) && lsel_r[me][ml]) begin
                     nz_rdata_e[me] = x_nz_rdata[ml];
                     e_rdata_e[me] = x_e_rdata[ml];
                 end
         end
     end
 
-    // C store block and fill seen by each engine (its job's slot)
+    // C store block and fill seen by each engine (its job's slot). The block
+    // select uses csel_r, csel one cycle later without an enable (the
+    // engine's first C read is issued in LDW).
+    reg [4:0] csel_r [0:NENG-1];
+    always @(posedge clk)
+        for (lr = 0; lr < NENG; lr = lr + 1)
+            csel_r[lr] <= csel[lr];
     reg [87:0] c_rd_e [0:NENG-1];
     integer ce, cs;
     always @(*) begin
         for (ce = 0; ce < NENG; ce = ce + 1) begin
             c_rd_e[ce] = 88'd0;
             for (cs = 0; cs < 5; cs = cs + 1)
-                if (csel[ce][cs]) begin
+                if (csel_r[ce][cs]) begin
                     c_rd_e[ce] = c_rd_e[ce] | c_rd[cs];
                 end
         end
@@ -772,7 +788,8 @@ module mlkem_core (
 
     // Seed words: written while ready, cleared with DONE and by seed_clr
     // (z is held in the input engine's z register, shared with Decaps.)
-    // seed_a also receives m' in Decaps, four bits per scalar group.
+    // seed_a also receives m' in Decaps, four bits per scalar group: the
+    // groups arrive in order (0..63), so they are shifted in from the top.
     integer sw, mpe;
     always @(posedge clk) begin
         if (seed_clr || tstate == DONE) begin
@@ -783,8 +800,8 @@ module mlkem_core (
                     seed_a[32*sw +: 32] <= seed_wdata;
             for (mpe = 0; mpe < NENG; mpe = mpe + 1)
                 if (e_mp_we[mpe])
-                    seed_a[4*e_c_widx[mpe] +: 4] <= {e_c_wdata[mpe][33], e_c_wdata[mpe][22],
-                                                     e_c_wdata[mpe][11], e_c_wdata[mpe][0]};
+                    seed_a <= {e_c_wdata[mpe][33], e_c_wdata[mpe][22],
+                               e_c_wdata[mpe][11], e_c_wdata[mpe][0], seed_a[255:4]};
         end
     end
 

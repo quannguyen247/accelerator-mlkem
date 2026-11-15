@@ -388,6 +388,7 @@ module mlkem_pmac (
     // source, the odd-row source and the vector.
     reg vr, g1_r, last_r;
     reg [1:0] h_r;
+    reg [1:0] h1_r;                 // h_r + 1 (the next quarter), registered
     reg [8:0] meta_r;
     reg [95:0] x0_r, x1_r, v_r;
     reg [47:0] g_r;
@@ -400,6 +401,7 @@ module mlkem_pmac (
         last_r <= last1;
         meta_r <= {p1, blk1, h1};
         h_r <= h1;
+        h1_r <= h1 + 2'd1;
         x0_r <= (ms0_1 == `MLKEM_MS_A) ? ae_rdata : (ms0_1 == `MLKEM_MS_S) ? s_rdata : t_rdata;
         x1_r <= (ms1_1 == `MLKEM_MS_A) ? ao_rdata : t_rdata;
         v_r <= v_rdata;
@@ -422,9 +424,9 @@ module mlkem_pmac (
         last2 <= last_r;
         m0_2 <= qtr24(x0_r, h_r);
         // Single-row pair: lane 1 takes the next quarter of the even row.
-        m1_2 <= g1_r ? qtr24(x1_r, h_r) : qtr24(x0_r, h_r + 2'd1);
+        m1_2 <= g1_r ? qtr24(x1_r, h_r) : qtr24(x0_r, h1_r);
         y2 <= qtr24(v_r, h_r);
-        y2b <= qtr24(v_r, g1_r ? h_r : h_r + 2'd1);
+        y2b <= qtr24(v_r, g1_r ? h_r : h1_r);
         g2 <= g_r[11:0];
         g2b <= g1_r ? g_r[11:0] : g_r[23:12];
         meta2 <= {g1_r, meta_r};

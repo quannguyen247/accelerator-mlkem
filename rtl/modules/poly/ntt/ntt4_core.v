@@ -59,6 +59,11 @@ module ntt4_core (
     // Pass control
     reg run;
     reg mode_r;
+    // mode_r one cycle later for the butterfly datapath (the first group
+    // reaches the stage 1 inputs three cycles after start)
+    reg mode_d;
+    always @(posedge clk)
+        mode_d <= mode_r;
     reg [1:0] pass;
     reg [6:0] g;                         // group counter, g >= 64: pass issued
     reg [5:0] pend;                      // groups issued, not yet written
@@ -262,25 +267,25 @@ module ntt4_core (
     wire single_s1, single_s2;
     mlkem_delay #(.W(1), .D(BF_LAT + 1)) u_dsg1 (.clk(clk), .d(single1), .q(single_s1));
     mlkem_delay #(.W(1), .D(2 * BF_LAT + 1)) u_dsg2 (.clk(clk), .d(single1), .q(single_s2));
-    wire s1_bypass = mode_r && single_s1;
-    wire s2_bypass = !mode_r && single_s2;
+    wire s1_bypass = mode_d && single_s1;
+    wire s2_bypass = !mode_d && single_s2;
 
     // Stage 1 inputs
     wire [11:0] s1a_a = x2[0];
-    wire [11:0] s1a_b = mode_r ? x2[1] : x2[2];
-    wire [11:0] s1b_a = mode_r ? x2[2] : x2[1];
+    wire [11:0] s1a_b = mode_d ? x2[1] : x2[2];
+    wire [11:0] s1b_a = mode_d ? x2[2] : x2[1];
     wire [11:0] s1b_b = x2[3];
-    wire [11:0] s1a_z = mode_r ? zb02 : za2;
-    wire [11:0] s1b_z = mode_r ? zb12 : za2;
+    wire [11:0] s1a_z = mode_d ? zb02 : za2;
+    wire [11:0] s1b_z = mode_d ? zb12 : za2;
 
     wire s1a_v, s1b_v_unused;
     wire [11:0] s1a_o0, s1a_o1, s1b_o0, s1b_o1;
     ntt_butterfly u_bf1a (
-        .clk(clk), .rst_n(rst_n), .mode(mode_r), .is_scale(1'b0),
+        .clk(clk), .rst_n(rst_n), .mode(mode_d), .is_scale(1'b0),
         .a_i(s1a_a), .b_i(s1a_b), .zeta_i(s1a_z), .valid_i(v2),
         .valid_o(s1a_v), .out0(s1a_o0), .out1(s1a_o1));
     ntt_butterfly u_bf1b (
-        .clk(clk), .rst_n(rst_n), .mode(mode_r), .is_scale(1'b0),
+        .clk(clk), .rst_n(rst_n), .mode(mode_d), .is_scale(1'b0),
         .a_i(s1b_a), .b_i(s1b_b), .zeta_i(s1b_z), .valid_i(v2),
         .valid_o(s1b_v_unused), .out0(s1b_o0), .out1(s1b_o1));
 
@@ -290,8 +295,8 @@ module ntt4_core (
     mlkem_delay #(.W(48), .D(BF_LAT)) u_dx2 (.clk(clk), .d(x2_bus), .q(x2_dly));
     wire [11:0] y [0:3];
     assign y[0] = s1_bypass ? x2_dly[11:0]  : s1a_o0;
-    assign y[1] = s1_bypass ? x2_dly[23:12] : (mode_r ? s1a_o1 : s1b_o0);
-    assign y[2] = s1_bypass ? x2_dly[35:24] : (mode_r ? s1b_o0 : s1a_o1);
+    assign y[1] = s1_bypass ? x2_dly[23:12] : (mode_d ? s1a_o1 : s1b_o0);
+    assign y[2] = s1_bypass ? x2_dly[35:24] : (mode_d ? s1b_o0 : s1a_o1);
     assign y[3] = s1_bypass ? x2_dly[47:36] : s1b_o1;
 
     // Stage 2 twiddles
@@ -302,20 +307,20 @@ module ntt4_core (
     wire [11:0] zb1_s2 = z_dly[35:24];
 
     wire [11:0] s2a_a = y[0];
-    wire [11:0] s2a_b = mode_r ? y[2] : y[1];
-    wire [11:0] s2b_a = mode_r ? y[1] : y[2];
+    wire [11:0] s2a_b = mode_d ? y[2] : y[1];
+    wire [11:0] s2b_a = mode_d ? y[1] : y[2];
     wire [11:0] s2b_b = y[3];
-    wire [11:0] s2a_z = mode_r ? za_s2 : zb0_s2;
-    wire [11:0] s2b_z = mode_r ? za_s2 : zb1_s2;
+    wire [11:0] s2a_z = mode_d ? za_s2 : zb0_s2;
+    wire [11:0] s2b_z = mode_d ? za_s2 : zb1_s2;
 
     wire s2a_v, s2b_v_unused;
     wire [11:0] s2a_o0, s2a_o1, s2b_o0, s2b_o1;
     ntt_butterfly u_bf2a (
-        .clk(clk), .rst_n(rst_n), .mode(mode_r), .is_scale(1'b0),
+        .clk(clk), .rst_n(rst_n), .mode(mode_d), .is_scale(1'b0),
         .a_i(s2a_a), .b_i(s2a_b), .zeta_i(s2a_z), .valid_i(s1a_v),
         .valid_o(s2a_v), .out0(s2a_o0), .out1(s2a_o1));
     ntt_butterfly u_bf2b (
-        .clk(clk), .rst_n(rst_n), .mode(mode_r), .is_scale(1'b0),
+        .clk(clk), .rst_n(rst_n), .mode(mode_d), .is_scale(1'b0),
         .a_i(s2b_a), .b_i(s2b_b), .zeta_i(s2b_z), .valid_i(s1a_v),
         .valid_o(s2b_v_unused), .out0(s2b_o0), .out1(s2b_o1));
 
@@ -324,8 +329,8 @@ module ntt4_core (
     mlkem_delay #(.W(48), .D(BF_LAT)) u_dy (.clk(clk), .d(y_bus), .q(y_dly));
     wire [11:0] w [0:3];
     assign w[0] = s2_bypass ? y_dly[11:0]  : s2a_o0;
-    assign w[1] = s2_bypass ? y_dly[23:12] : (mode_r ? s2b_o0 : s2a_o1);
-    assign w[2] = s2_bypass ? y_dly[35:24] : (mode_r ? s2a_o1 : s2b_o0);
+    assign w[1] = s2_bypass ? y_dly[23:12] : (mode_d ? s2b_o0 : s2a_o1);
+    assign w[2] = s2_bypass ? y_dly[35:24] : (mode_d ? s2a_o1 : s2b_o0);
     assign w[3] = s2_bypass ? y_dly[47:36] : s2b_o1;
     assign wb_v = s2a_v;
 

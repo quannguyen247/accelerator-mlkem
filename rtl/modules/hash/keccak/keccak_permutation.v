@@ -66,10 +66,10 @@ module keccak_permutation (
     // round logic and the input share one LUT. The reset and clear (the
     // sponge is idle, never with a block) act on the register reset, the
     // lane enables on the register enables.
-    // Kept as one net per bit: the sponge's input select stays in its own
-    // LUT and the state bit's LUT sees a single input bit (with the three
-    // chi operands, the state bit and idle: six inputs).
-    (* keep = "true" *) wire [`KECCAK_STATE_WIDTH-1:0] xin = xor_in;
+    // The input is the hash engine's absorb block register, so a state
+    // bit's LUT sees one input bit (with the three chi operands, the state
+    // bit and idle: six inputs).
+    wire [`KECCAK_STATE_WIDTH-1:0] xin = xor_in;
     integer l;
     always @(posedge clk) begin
         for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1) begin

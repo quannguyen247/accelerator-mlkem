@@ -289,20 +289,29 @@ module mlkem_out (
             r0_bias <= a_bias;
             r0_sd <= a_sd;
             r0_dest <= a_dest;
-            r0_s <= rd_s_data;
-            r0_t <= rd_t_data;
-            r0_c <= rd_c_data;
-            r0_add <= bias_data;
-            r0_word <= reg_val[{a_wsel, 6'd0} +: 64];
             r1_reg <= r0_reg;
             r1_bias <= r0_bias;
             r1_sd <= r0_sd;
             r1_data <= r0_reg ? {32'd0, r0_word} : r0_data;
-            r1_add <= r0_add;
             r2_reg <= r1_reg;
             r2_sd <= r1_sd;
             r2_data <= r1_sum;
         end
+        // Source registers of R0 (and the R1 bias): each takes only the
+        // blocks that use it (the flags travel with the block), so adv
+        // enables the shared stages only.
+        if (adv && !a_reg && (a_dest == 2'd0))
+            r0_s <= rd_s_data;
+        if (adv && !a_reg && (a_dest == 2'd1))
+            r0_t <= rd_t_data;
+        if (adv && !a_reg && a_dest[1])
+            r0_c <= rd_c_data;
+        if (adv && a_bias)
+            r0_add <= bias_data;
+        if (adv && a_reg)
+            r0_word <= reg_val[{a_wsel, 6'd0} +: 64];
+        if (adv && r0_bias)
+            r1_add <= r0_add;
     end
 
     mlkem_axis_slice #(.W(100)) u_dslice (

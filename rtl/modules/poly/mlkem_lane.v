@@ -250,22 +250,30 @@ module mlkem_lane (
     reg [47:0] l1_raw, l2_val;
 
     // CBD noise, PMAC result from the buffer, or Decaps u' decompressed from
-    // the C store (du = 10 or 11)
+    // the C store (du = 10 or 11). The source selects of the stage 1 and 2
+    // registers are the decode of jd_ld one cycle later (ld_dec_d, ld_buf_d):
+    // the first group reaches stage 1 three cycles after the job is latched
+    // (LDW, issue, stage A), so the select registers drive only these values.
     integer i;
+    reg ld_dec_d, ld_buf_d;
+    always @(posedge clk) begin
+        ld_dec_d <= (jd_ld == `MLKEM_LD_DEC);
+        ld_buf_d <= (jd_ld == `MLKEM_LD_BUF);
+    end
     reg [12:0] l1_y3 [0:3];
     reg [11:0] l1_yr [0:3];
     reg [22:0] l1_sum;
     always @(posedge clk) begin
-        l1_raw <= (jd_ld == `MLKEM_LD_DEC) ?
+        l1_raw <= ld_dec_d ?
                   {1'b0, c_sel[43:33], 1'b0, c_sel[32:22], 1'b0, c_sel[21:11], 1'b0, c_sel[10:0]} :
-                  (jd_ld == `MLKEM_LD_BUF) ? b_sel : cbd_reg;
+                  ld_buf_d ? b_sel : cbd_reg;
         for (i = 0; i < 4; i = i + 1) begin
             l1_y3[i] <= {2'd0, c_sel[11*i +: 11]} + {1'b0, c_sel[11*i +: 11], 1'b0};
             l1_yr[i] <= {1'b0, c_sel[11*i +: 11]} + (k4_reg ? 12'd1024 : 12'd512);
         end
         for (i = 0; i < 4; i = i + 1) begin
             l1_sum = mlkem_decompress_sum(l1_y3[i], l1_raw[12*i +: 11], l1_yr[i]);
-            l2_val[12*i +: 12] <= (jd_ld != `MLKEM_LD_DEC) ? l1_raw[12*i +: 12] :
+            l2_val[12*i +: 12] <= !ld_dec_d ? l1_raw[12*i +: 12] :
                                   k4_reg ? l1_sum[22:11] : l1_sum[21:10];
         end
     end

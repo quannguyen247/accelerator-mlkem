@@ -189,6 +189,9 @@ module mlkem_in (
     reg [2:0] b_slot;
     reg [4:0] b_blk;
     reg [1:0] b_sreg;
+    // Register segment word for rho / h / z, with bv: the four words of a
+    // register arrive in order, so they are shifted in from the top.
+    reg sh_rho, sh_h, sh_z;
     reg [95:0] b_vals;
     assign busy = active || bv;
 
@@ -240,12 +243,18 @@ module mlkem_in (
             z_v <= 1'b0;
             err <= 1'b0;
             bv <= 1'b0;
+            sh_rho <= 1'b0;
+            sh_h <= 1'b0;
+            sh_z <= 1'b0;
         end else begin
             st_we_s <= 4'd0;
             st_we_t <= 4'd0;
             st_we_c <= 5'd0;
             err <= 1'b0;
             bv <= 1'b0;
+            sh_rho <= 1'b0;
+            sh_h <= 1'b0;
+            sh_z <= 1'b0;
             key_bad <= 1'b0;
             if (key_bad) begin
                 err <= 1'b1;
@@ -260,6 +269,9 @@ module mlkem_in (
 
             if (active && up_valid) begin
                 bv <= 1'b1;
+                sh_rho <= (sk == SK_REG) && (sreg == 2'd0);
+                sh_h <= (sk == SK_REG) && (sreg == 2'd1);
+                sh_z <= (sk == SK_REG) && (sreg[1] == 1'b1);
                 b_reg_seg <= (sk == SK_REG);
                 b_d12 <= (sd == 4'd12);
                 b_chk <= schk;
@@ -284,11 +296,6 @@ module mlkem_in (
                     st_data <= red;
                     key_bad <= b_chk && bad;
                 end else begin
-                    case (b_sreg)
-                        2'd0: rho[b_blk[1:0]*64 +: 64] <= b_vals[63:0];
-                        2'd1: h[b_blk[1:0]*64 +: 64] <= b_vals[63:0];
-                        default: z[b_blk[1:0]*64 +: 64] <= b_vals[63:0];
-                    endcase
                     if (b_blk[1:0] == 2'd3) begin
                         case (b_sreg)
                             2'd0: rho_v <= 1'b1;
@@ -299,6 +306,12 @@ module mlkem_in (
                 end
             end
 
+            if (sh_rho)
+                rho <= {b_vals[63:0], rho[255:64]};
+            if (sh_h)
+                h <= {b_vals[63:0], h[255:64]};
+            if (sh_z)
+                z <= {b_vals[63:0], z[255:64]};
             if (ext_rho_we)
                 rho <= ext_val;
             if (ext_h_we)

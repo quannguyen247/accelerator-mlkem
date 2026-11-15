@@ -27,7 +27,11 @@ module mlkem_cbd4_stream (
     reg [6:0] cnt;
 
     wire [6:0] need = eta3 ? 7'd24 : 7'd16;
-    wire refill = (cnt < need);
+    // refill == (cnt < need), registered with cnt: it selects the 88-bit
+    // insert. eta3 changes only between the load and the unload, each of
+    // which starts with init.
+    reg refill_q;
+    wire refill = refill_q;
     wire can = !refill || nxt_v;
     wire take = (!val_v || pop) && can;
 
@@ -73,6 +77,7 @@ module mlkem_cbd4_stream (
             wptr <= 5'd0;
             nxt_v <= 1'b0;
             cnt <= 7'd0;
+            refill_q <= 1'b1;
             sr <= 88'd0;
             val_v <= 1'b0;
         end else begin
@@ -81,6 +86,7 @@ module mlkem_cbd4_stream (
                 val_v <= 1'b1;
                 sr <= eta3 ? (sr_f >> 24) : (sr_f >> 16);
                 cnt <= cnt_f - need;
+                refill_q <= (cnt_f - need < need);
             end else if (pop) begin
                 val_v <= 1'b0;
             end
