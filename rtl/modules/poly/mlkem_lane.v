@@ -5,7 +5,9 @@
 // pipelines around the core's four-coefficient-per-cycle port (one group =
 // coefficients 4n .. 4n + 3 per cycle, so a load or an unload takes 64
 // cycles). Unloading writes zeros behind the read, so the core RAM is clean
-// after every job.
+// after every job. Every read takes one cycle more than the issue: the
+// buffer and C store register the block address beside the memory (the
+// engine sends n), and the core read follows the issue by one cycle (na).
 //
 // The engine runs one job at a time for a logical lane (jlane) whose noise
 // memory and buffer live in mlkem_lane_ctx; the core routes the context and
@@ -38,7 +40,8 @@ module mlkem_lane (
     output reg [3:0] lid,               // logical lane of the current job
     output wire [2:0] cslot,            // C store slot of the current job
 
-    // Context of the current job
+    // Context of the current job (b_rdata: block b_rblk, one cycle after
+    // the address)
     output wire [4:0] nz_raddr,
     input wire [63:0] nz_rdata,
     input wire [4:0] nz_cnt,
@@ -61,7 +64,7 @@ module mlkem_lane (
     output reg s_last,
 
     // C store slot cslot: block read (c_rdata[87:0], eight 11-bit values at
-    // c_rblk) and group write. c_rdata[91:88] are the message bits of group
+    // c_rblk, one cycle after the address) and group write. c_rdata[91:88] are the message bits of group
     // mu_idx, valid one cycle after the index.
     output wire c_rreq,
     output wire [4:0] c_rblk,
@@ -187,6 +190,7 @@ module mlkem_lane (
     // of ext_raddr arrives in the next cycle.
     reg core_rst_n_reg;
     reg core_start;
+    reg [5:0] na;                        // group issued one cycle ago
     reg ext_we;
     reg [5:0] ext_waddr;
     reg [47:0] ext_din;
@@ -205,30 +209,33 @@ module mlkem_lane (
         .ext_we(ext_we),
         .ext_waddr(ext_waddr),
         .ext_din(ext_din),
-        .ext_raddr(n[5:0]),
+        .ext_raddr(na),
         .ext_dout(ext_dout),
         .busy(core_busy_unused),
         .done(core_done)
     );
 
-    // Group issued one, two and three cycles ago
+    // Group issued two, three and four cycles ago (na: one cycle)
     reg [5:0] n0, n1, n2;
     always @(posedge clk) begin
-        n0 <= n[5:0];
+        na <= n[5:0];
+        n0 <= na;
         n1 <= n0;
         n2 <= n1;
     end
     assign mu_idx = n0;
 
     // Stage 0 of both pipelines: the C store block, the buffer block and the
-    // CBD values of the issued group, registered.
+    // CBD values of the issued group, registered (the CBD values wait one
+    // cycle in cbd_a for the store reads).
     reg [87:0] c_blk_reg;
     reg [95:0] b_blk_reg;
-    reg [47:0] cbd_reg;
+    reg [47:0] cbd_a, cbd_reg;
     always @(posedge clk) begin
         c_blk_reg <= c_rdata[87:0];
         b_blk_reg <= b_rdata;
-        cbd_reg <= cbd_val;
+        cbd_a <= cbd_val;
+        cbd_reg <= cbd_a;
     end
     wire [43:0] c_sel = n0[0] ? c_blk_reg[87:44] : c_blk_reg[43:0];
     wire [47:0] b_sel = n0[0] ? b_blk_reg[95:48] : b_blk_reg[47:0];
@@ -239,7 +246,7 @@ module mlkem_lane (
                     ((b_ep == jd_ld_ep) && (b_fill > {1'b0, n[5:1]}));
     wire ld_issue = st_load && !n[6] && ld_ready;
 
-    reg l0_v, l1_v, l2_v;
+    reg la_v, l0_v, l1_v, l2_v;
     reg [47:0] l1_raw, l2_val;
 
     // CBD noise, PMAC result from the buffer, or Decaps u' decompressed from
@@ -271,7 +278,7 @@ module mlkem_lane (
     reg [5:0] n7;
     reg n7_first, n7_last;               // n7 == 0, n7 ends a block of eight
     wire [5:0] n6;
-    wire v6 = v_ul[5];
+    wire v6 = v_ul[6];
 
     assign cbd_pop = cbd_v && !n[6] && ((st_load && (jd_ld == `MLKEM_LD_CBD)) || (st_unload && ul_noise));
     assign cbd_init = (st_ldw && jd_ld == `MLKEM_LD_CBD && nz_rdy) ||
@@ -303,7 +310,7 @@ module mlkem_lane (
     end
 
     // FSM transition conditions
-    wire ld_done = n[6] && !l0_v && !l1_v && !l2_v && !ext_we;
+    wire ld_done = n[6] && !la_v && !l0_v && !l1_v && !l2_v && !ext_we;
     // C store slot complete, registered (fills only grow during a job)
     reg c_full_q;
     always @(posedge clk)
@@ -380,7 +387,7 @@ module mlkem_lane (
                     if (ul_go)
                         n <= n + 7'd1;
                     if (n[6])
-                        drain <= 4'd11;
+                        drain <= 4'd12;
                 end
                 st_drain: begin
                     drain <= drain - 4'd1;
@@ -396,13 +403,15 @@ module mlkem_lane (
     // Pipeline valid flags
     always @(posedge clk) begin
         if (!rst_n || kill) begin
+            la_v <= 1'b0;
             l0_v <= 1'b0;
             l1_v <= 1'b0;
             l2_v <= 1'b0;
             v0 <= 1'b0;
             v_ul <= 8'd0;
         end else begin
-            l0_v <= ld_issue;
+            la_v <= ld_issue;
+            l0_v <= la_v;
             l1_v <= l0_v;
             l2_v <= l1_v;
             v0 <= ul_go;
@@ -410,7 +419,7 @@ module mlkem_lane (
         end
     end
 
-    // Unload stage 1: the core returns the group read one cycle after the issue.
+    // Unload stage 1: the core returns group na (read one cycle after the issue).
     always @(posedge clk) begin
         x1 <= ext_dout;
         n7 <= n6;

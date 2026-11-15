@@ -119,8 +119,9 @@ module mlkem_core (
     wire [95:0] pm_wr0_data, pm_wr1_data;
 
     wire [1:0] out_rd_dest;
-    wire [2:0] out_rd_slot;
-    wire [4:0] out_rd_blk, out_rd_blk_c, out_rd_blk_b;
+    wire [2:0] out_rd_slot, out_rd_dslot;
+    wire out_rd_en;
+    wire [4:0] out_rd_blk;
 
     // m' (Decaps) is kept in seed_a, which Decaps does not use.
     reg [8:0] mp_cnt;
@@ -156,8 +157,10 @@ module mlkem_core (
     // top bit alone tells whether the stores are being cleared.
     wire scrub_mem = !sc[5];
 
-    // Every store has two read ports with their own address: one for the
-    // compute engines (PMAC, lanes), one for the output engine (*_o).
+    // Every store has one read port, shared by the compute engines (PMAC,
+    // lanes) and the output engine (*_o) by request type. Reads take one
+    // cycle: the block address is registered in the store (the output
+    // engine's address only while out_rd_en, see mlkem_out).
     wire [95:0] s_rd [0:3];
     wire [95:0] t_rd [0:3];
     wire [87:0] c_rd [0:4];
@@ -195,9 +198,10 @@ module mlkem_core (
             end
             // One read port: the output engine reads S only in KeyGen, the
             // PMAC only in Decaps.
-            mlkem_poly_ram #(.W(12), .AW(5)) u_s (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_s (
                 .clk(clk), .we(s_we), .waddr({8{s_wa}}), .wdata(s_wd),
-                .raddr(is_kg ? out_rd_blk : pm_s_blk), .rdata(s_rd[g]));
+                .ra_en(is_kg ? out_rd_en : 1'b1), .raddr(is_kg ? out_rd_blk : pm_s_blk),
+                .rdata(s_rd[g]));
             assign s_rd_o[g] = s_rd[g];
             wire s_ep_unused;
             mlkem_slot_state u_s_st (
@@ -215,10 +219,11 @@ module mlkem_core (
             wire t_ep_unused;
             // One read port: the output engine reads T only in KeyGen (the
             // PMAC writes it then), the PMAC only in Encaps / Decaps.
-            mlkem_poly_ram #(.W(12), .AW(5)) u_t (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_t (
                 .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
                 .wdata(t_pm ? t_pm_data : st_data),
-                .raddr(is_kg ? out_rd_blk : pm_t_blk), .rdata(t_rd[g]));
+                .ra_en(is_kg ? out_rd_en : 1'b1), .raddr(is_kg ? out_rd_blk : pm_t_blk),
+                .rdata(t_rd[g]));
             assign t_rd_o[g] = t_rd[g];
             mlkem_slot_state u_t_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
@@ -251,9 +256,10 @@ module mlkem_core (
             end
             // One read port: the output engine reads C only in Encaps (the
             // engines write it then), the engines only in Decaps.
-            mlkem_poly_ram #(.W(11), .AW(5)) u_c (
+            mlkem_poly_ram #(.W(11), .AW(5), .RREG(1)) u_c (
                 .clk(clk), .we(c_we), .waddr({8{c_wa}}), .wdata(c_wd),
-                .raddr(is_enc ? out_rd_blk_c : c_rblk), .rdata(c_rd[g]));
+                .ra_en(is_enc ? out_rd_en : 1'b1), .raddr(is_enc ? out_rd_blk : c_rblk),
+                .rdata(c_rd[g]));
             assign c_rd_o[g] = c_rd[g];
             wire c_ep_unused;
             mlkem_slot_state u_c_st (
@@ -350,7 +356,7 @@ module mlkem_core (
             wire pm_w;
             wire [95:0] pm_wdata;
             wire pm_wep;
-            wire [4:0] pm_rblk = (g < 4) ? pm_v_blk : out_rd_blk_b;
+            wire [4:0] pm_rblk = (g < 4) ? pm_v_blk : out_rd_blk;
             if (g < 4) begin : g_pm_none
                 assign pm_w = 1'b0;
                 assign pm_wdata = 96'd0;
@@ -369,7 +375,7 @@ module mlkem_core (
                 .out_rd(is_kg), .busy(x_busy[g]),
                 .nz_we(nz_we && nz_lane == g), .nz_addr(nz_addr), .nz_wdata(nz_wdata),
                 .nz_cnt(x_nz_cnt[g]), .nz_raddr(x_nz_raddr[g]), .nz_rdata(x_nz_rdata[g]),
-                .pm_rd_blk(pm_rblk), .pm_rd_data(l_pm_rdata[g]),
+                .pm_ra_en(out_rd_en), .pm_rd_blk(pm_rblk), .pm_rd_data(l_pm_rdata[g]),
                 .pm_we(pm_w), .pm_wr_blk(pm_wr_blk), .pm_wr_first(pm_wr_first),
                 .pm_wr_data(pm_wdata), .pm_wr_ep(pm_wep),
                 .e_rblk(x_e_rblk[g]), .e_rdata(x_e_rdata[g]),
@@ -423,24 +429,34 @@ module mlkem_core (
     // on whichever engine is free.
     //   engine 0: lanes 0, 3, 5, 6 (+ 8)    engine 1: lanes 1, 2, 4, 7 (+ 8)
     // Pick order within an engine: vector lanes, the rows, the scalar lane
-    // (so the shared scalar job goes to the engine without a row to run)
-    function [4:0] pick;                 // {valid, lane}
+    // (so the shared scalar job goes to the engine without a row to run),
+    // i.e. the lowest candidate lane; picks are one-hot, like lsel.
+    function [8:0] pick;
         input [8:0] c;
-        integer pi;
+        pick = c & (~c + 9'd1);
+    endfunction
+    // C slot of a lane (one-hot): s for lanes s and s + 4, slot 4 for lane 8
+    function [4:0] cslot_of;
+        input [8:0] oh;
+        cslot_of = {oh[8], oh[7:4] | oh[3:0]};
+    endfunction
+    function [3:0] lane_of;
+        input [8:0] oh;
+        integer li;
         begin
-            pick = c[8] ? {1'b1, 4'd8} : 5'd0;
-            for (pi = 7; pi >= 0; pi = pi - 1)
-                if (c[pi])
-                    pick = {1'b1, pi[3:0]};
+            lane_of = 4'd0;
+            for (li = 0; li < 9; li = li + 1)
+                if (oh[li])
+                    lane_of = li[3:0];
         end
     endfunction
     wire [8:0] cand = pend & rdy_q;
     wire e0_free = !e_busy[0] && !jst[0];
     wire e1_free = !e_busy[1] && !jst[1];
-    wire [4:0] pk0 = e0_free ? pick(cand & LMASK0) : 5'd0;
-    wire [4:0] pk1 = e1_free ? pick(cand & LMASK1 & ((pk0 == {1'b1, 4'd8}) ? 9'h0FF : 9'h1FF)) : 5'd0;
+    wire [8:0] pk0 = e0_free ? pick(cand & LMASK0) : 9'd0;
+    wire [8:0] pk1 = e1_free ? pick(cand & LMASK1 & ~{pk0[8], 8'd0}) : 9'd0;
 
-    integer de;
+    integer de, dl;
     always @(posedge clk) begin
         if (!rst_n || kill) begin
             pend <= 9'd0;
@@ -476,22 +492,26 @@ module mlkem_core (
                         end
                     end
                 end
-                if (pk0[4]) begin
-                    lsel[0] <= 9'd1 << pk0[3:0];
-                    csel[0] <= 5'd1 << ((pk0[3:0] == 4'd8) ? 3'd4 : {1'b0, pk0[1:0]});
+                if (pk0 != 9'd0) begin
+                    lsel[0] <= pk0;
+                    csel[0] <= cslot_of(pk0);
                     jst[0] <= 1'b1;
-                    jst_lane[0] <= pk0[3:0];
-                    jst_num[0] <= jn[pk0[3:0]];
-                    pend[pk0[3:0]] <= 1'b0;
+                    jst_lane[0] <= lane_of(pk0);
+                    jst_num[0] <= |(jn & pk0);
+                    for (dl = 0; dl < 9; dl = dl + 1)
+                        if (pk0[dl])
+                            pend[dl] <= 1'b0;
                     e_job[0] <= 1'b1;
                 end
-                if (pk1[4]) begin
-                    lsel[1] <= 9'd1 << pk1[3:0];
-                    csel[1] <= 5'd1 << ((pk1[3:0] == 4'd8) ? 3'd4 : {1'b0, pk1[1:0]});
+                if (pk1 != 9'd0) begin
+                    lsel[1] <= pk1;
+                    csel[1] <= cslot_of(pk1);
                     jst[1] <= 1'b1;
-                    jst_lane[1] <= pk1[3:0];
-                    jst_num[1] <= jn[pk1[3:0]];
-                    pend[pk1[3:0]] <= 1'b0;
+                    jst_lane[1] <= lane_of(pk1);
+                    jst_num[1] <= |(jn & pk1);
+                    for (dl = 0; dl < 9; dl = dl + 1)
+                        if (pk1[dl])
+                            pend[dl] <= 1'b0;
                     e_job[1] <= 1'b1;
                 end
             end
@@ -508,12 +528,10 @@ module mlkem_core (
     always @(*) begin
         for (me = 0; me < NENG; me = me + 1) begin
             nz_rdata_e[me] = 64'd0;
-            nz_cnt_e[me] = 5'd0;
             e_rdata_e[me] = 96'd0;
             for (ml = 0; ml < 9; ml = ml + 1)
                 if (((me == 0) ? LMASK0[ml] : LMASK1[ml]) && lsel[me][ml]) begin
                     nz_rdata_e[me] = x_nz_rdata[ml];
-                    nz_cnt_e[me] = x_nz_cnt[ml];
                     e_rdata_e[me] = x_e_rdata[ml];
                 end
         end
@@ -532,18 +550,20 @@ module mlkem_core (
         end
     end
 
-    // Buffer / C store fill and buffer epoch of each engine's job, registered:
-    // fills only grow, so a one-cycle-old value is a safe (conservative)
-    // answer to the engine's load readiness.
+    // Noise count, buffer / C store fill and buffer epoch of each engine's
+    // job, registered: counts and fills only grow, so a one-cycle-old value
+    // is a safe (conservative) answer to the engine's readiness.
     reg [5:0] c_fill_e [0:NENG-1];
     integer fe, fl;
     always @(posedge clk) begin
         for (fe = 0; fe < NENG; fe = fe + 1) begin
+            nz_cnt_e[fe] <= 5'd0;
             l_b_fill_e[fe] <= 6'd0;
             l_b_ep_e[fe] <= 1'b0;
             c_fill_e[fe] <= 6'd0;
             for (fl = 0; fl < 9; fl = fl + 1)
                 if (((fe == 0) ? LMASK0[fl] : LMASK1[fl]) && lsel[fe][fl] && !jst[fe]) begin
+                    nz_cnt_e[fe] <= x_nz_cnt[fl];
                     l_b_fill_e[fe] <= l_b_fill[fl];
                     l_b_ep_e[fe] <= l_b_ep[fl];
                 end
@@ -652,6 +672,8 @@ module mlkem_core (
         .err(in_err)
     );
 
+    // 256 words: also holds a whole KeyGen ek copy (196 words at most), which
+    // the output engine pushes without looking at full.
     mlkem_fifo #(.W(64), .AW(8)) u_fifo (
         .clk(clk), .rst_n(rst_n), .clr(go || kill),
         .push(fifo_push_in || fifo_push_out),
@@ -722,16 +744,16 @@ module mlkem_core (
     mlkem_out u_out (
         .clk(clk), .rst_n(rst_n), .kill(kill), .go(go),
         .op(op_r), .k(k_r), .busy(out_busy), .secrets_read(out_secrets_read),
-        .rd_dest(out_rd_dest), .rd_slot(out_rd_slot), .rd_blk(out_rd_blk),
-        .rd_blk_c(out_rd_blk_c), .rd_blk_b(out_rd_blk_b),
-        .rd_s_data(s_rd_o[out_rd_slot[1:0]]), .rd_t_data(t_rd_o[out_rd_slot[1:0]]),
-        .rd_c_data(c_rd_o[out_rd_slot]), .rd_fill(out_rd_fill),
-        .bias_data(l_pm_rdata[4 + out_rd_slot[1:0]]),
+        .rd_dest(out_rd_dest), .rd_slot(out_rd_slot), .rd_en(out_rd_en), .rd_blk(out_rd_blk),
+        .rd_dslot(out_rd_dslot),
+        .rd_s_data(s_rd_o[out_rd_dslot[1:0]]), .rd_t_data(t_rd_o[out_rd_dslot[1:0]]),
+        .rd_c_data(c_rd_o[out_rd_dslot]), .rd_fill(out_rd_fill),
+        .bias_data(l_pm_rdata[4 + out_rd_dslot[1:0]]),
         .bias_fill(l_b_fill[4 + out_rd_slot[1:0]]),
         .bias_ep(l_b_ep[4 + out_rd_slot[1:0]]),
         .rho(rho), .rho_v(rho_v), .h(h), .h_v(h_v), .z(in_z),
         .key(is_enc ? kk : k_final), .key_v(is_enc ? kk_v : fin_v),
-        .fifo_push(fifo_push_out), .fifo_din(fifo_din_out), .fifo_full(fifo_full),
+        .fifo_push(fifo_push_out), .fifo_din(fifo_din_out),
         .m_tdata(out_data), .m_tvalid(out_valid), .m_tready(out_ready)
     );
 

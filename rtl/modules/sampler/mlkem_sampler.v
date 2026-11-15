@@ -126,7 +126,9 @@ module mlkem_sampler (
 
     // Stage C: compacting write into eight banks. Bank m takes the accepted
     // candidate of rank m - count (mod 8); its index is registered here and
-    // the value is selected in stage D.
+    // the value is selected in stage D. The accepted ranks are 0 .. total - 1,
+    // so the bank is written when that rank is below the total (and the
+    // polynomial is not full); the rank compare only picks the index.
     // Rows of one parity share a half: slot {r, j} -> half r[0], word {r[1], j, blk}.
     reg [7:0] hit;
     reg [8*3-1:0] sel;
@@ -142,12 +144,10 @@ module mlkem_sampler (
             want = m[2:0] - count[2:0];
             pos = count + {6'd0, want};
             waddr[8*m +: 8] = {slot[3], slot[1:0], pos[7:3]};
-            for (r = 0; r < 8; r = r + 1) begin
-                if (vr && ok_r[r] && rank_r[3*r +: 3] == want && !pos[8]) begin
-                    hit[m] = 1'b1;
+            hit[m] = vr && ({1'b0, want} < total_r) && !pos[8];
+            for (r = 0; r < 8; r = r + 1)
+                if (ok_r[r] && rank_r[3*r +: 3] == want)
                     sel[3*m +: 3] = r[2:0];
-                end
-            end
         end
     end
 
@@ -222,6 +222,7 @@ module mlkem_sampler (
         .we(we_e_q),
         .waddr(waddr_e_q),
         .wdata(wdata_e_q),
+        .ra_en(1'b1),
         .raddr({rde_slot, rd_blk}),
         .rdata(rde_data)
     );
@@ -231,6 +232,7 @@ module mlkem_sampler (
         .we(we_o_q),
         .waddr(waddr_o_q),
         .wdata(wdata_o_q),
+        .ra_en(1'b1),
         .raddr({rdo_slot, rd_blk}),
         .rdata(rdo_data)
     );

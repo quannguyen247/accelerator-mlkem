@@ -10,6 +10,8 @@
 //                      e^), read by the engine and by the output engine (bias)
 //   LANE 8     scalar: buffer written by the PMAC, read by the engine
 // scrub clears the noise memory and the buffer (32 cycles, busy meanwhile).
+// Buffer reads take one cycle: the read address is registered in the buffer
+// (the output engine's address only while pm_ra_en, see mlkem_out).
 module mlkem_lane_ctx #(
     parameter LANE = 0
 )(
@@ -30,6 +32,7 @@ module mlkem_lane_ctx #(
     output wire [63:0] nz_rdata,
 
     // PMAC / output port
+    input wire pm_ra_en,
     input wire [4:0] pm_rd_blk,
     output wire [95:0] pm_rd_data,
     input wire pm_we,
@@ -129,21 +132,22 @@ module mlkem_lane_ctx #(
         if (IS_ROW) begin : g_two
             // One read port: the output engine reads the KeyGen e^ bias, the
             // engine loads the PMAC row in Encaps / Decaps.
-            mlkem_poly_ram #(.W(12), .AW(5)) u_buf (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_buf (
                 .clk(clk), .we(b_we), .waddr({8{b_waddr}}), .wdata(b_wdata),
-                .raddr(out_rd ? pm_rd_blk : e_rblk), .rdata(e_rdata));
+                .ra_en(out_rd ? pm_ra_en : 1'b1), .raddr(out_rd ? pm_rd_blk : e_rblk),
+                .rdata(e_rdata));
             assign pm_rd_data = e_rdata;
         end else if (IS_VEC) begin : g_vec
             // Read only by the PMAC
-            mlkem_poly_ram #(.W(12), .AW(5)) u_buf (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_buf (
                 .clk(clk), .we(b_we), .waddr({8{b_waddr}}), .wdata(b_wdata),
-                .raddr(pm_rd_blk), .rdata(pm_rd_data));
+                .ra_en(1'b1), .raddr(pm_rd_blk), .rdata(pm_rd_data));
             assign e_rdata = 96'd0;
         end else begin : g_scl
             // Read only by the engine
-            mlkem_poly_ram #(.W(12), .AW(5)) u_buf (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_buf (
                 .clk(clk), .we(b_we), .waddr({8{b_waddr}}), .wdata(b_wdata),
-                .raddr(e_rblk), .rdata(e_rdata));
+                .ra_en(1'b1), .raddr(e_rblk), .rdata(e_rdata));
             assign pm_rd_data = 96'd0;
         end
     endgenerate

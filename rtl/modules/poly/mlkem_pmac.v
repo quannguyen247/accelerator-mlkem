@@ -35,6 +35,8 @@ module mlkem_pmac (
     input wire [95:0] ao_rdata,
     input wire [16*6-1:0] a_fill,
 
+    // S, T stores and vector buffers: *_blk is the stage-0 block, registered
+    // by the memories (stage 1); *_rdata is the block of slot *_slot.
     // S store
     output wire [1:0] s_slot,
     output wire [4:0] s_blk,
@@ -189,6 +191,7 @@ module mlkem_pmac (
     reg [7:0] b_grp;                // quarter-block of the group in progress
     reg jlast;                      // the term in progress is the group's last (j == k - 1)
     reg [2:0] cur_oh;               // one-hot of cur
+    reg g1_cur;                     // g1_q[cur]
     reg [1:0] c0, c1, c2;           // pair order of the next start
     reg nxt_v;
     reg [1:0] nxt_p;
@@ -201,7 +204,7 @@ module mlkem_pmac (
     always @(*) begin
         // A started block is finished first: its quarters follow each other
         // directly in the same pair (the output holds three quarters).
-        mid_any = in_grp ? (b_grp[1:0] != (g1_q[cur] ? 2'd3 : 2'd2)) : ((bp[0][1:0] != 2'd0) || (bp[1][1:0] != 2'd0) || (bp[2][1:0] != 2'd0));
+        mid_any = in_grp ? (b_grp[1:0] != (g1_cur ? 2'd3 : 2'd2)) : ((bp[0][1:0] != 2'd0) || (bp[1][1:0] != 2'd0) || (bp[2][1:0] != 2'd0));
         for (a = 0; a < 3; a = a + 1) begin
             if (in_grp)
                 avail[a] = jlast && (cur_oh[a] ? rdyn_q[a] : (!mid_any && rdy_q[a]));
@@ -309,17 +312,18 @@ module mlkem_pmac (
                 if (start) begin
                     cur <= nxt_p;
                     cur_oh <= 3'b001 << nxt_p;
+                    g1_cur <= g1_q[nxt_p];
                     b_grp <= nxt_b;
                 end
                 if (last_j) begin
                     in_grp <= 1'b0;
                     j <= 3'd0;
                     jlast <= 1'b0;
-                    bp[cur] <= b_grp + (g1_q[cur] ? 8'd1 : 8'd2);
-                    bp1[cur] <= b_grp + (g1_q[cur] ? 8'd2 : 8'd4);
+                    bp[cur] <= b_grp + (g1_cur ? 8'd1 : 8'd2);
+                    bp1[cur] <= b_grp + (g1_cur ? 8'd2 : 8'd4);
                     inc_q[cur] <= 1'b1;
-                    groups <= groups + (g1_q[cur] ? 9'd1 : 9'd2);
-                    if (groups + (g1_q[cur] ? 9'd1 : 9'd2) == total) begin
+                    groups <= groups + (g1_cur ? 9'd1 : 9'd2);
+                    if (groups + (g1_cur ? 9'd1 : 9'd2) == total) begin
                         running <= 1'b0;
                         drain <= DRAIN;
                     end
@@ -332,7 +336,8 @@ module mlkem_pmac (
         end
     end
 
-    // Stage 1: registered read addresses
+    // Stage 1: registered read addresses (the S, T and vector memories
+    // register b[7:2] themselves, so their copy equals blk1)
     reg v1, g1_1, last1;
     reg [1:0] h1;
     reg [4:0] blk1;
@@ -360,11 +365,11 @@ module mlkem_pmac (
     assign ao_slot = {p1[0], j1};
     assign a_blk = blk1;
     assign s_slot = j1;
-    assign s_blk = blk1;
+    assign s_blk = b[7:2];
     assign t_slot = j1;
-    assign t_blk = blk1;
+    assign t_blk = b[7:2];
     assign v_slot = j1;
-    assign v_blk = blk1;
+    assign v_blk = b[7:2];
 
     wire [47:0] g_blk;
     mlkem_gamma_rom u_gamma (.blk(blk1), .g(g_blk));

@@ -19,18 +19,20 @@ module mlkem_out (
     output wire busy,
     output wire secrets_read,      // no further reads of the S store or lane buffers
 
-    // Store read
-    output wire [1:0] rd_dest,     // 0: S, 1: T, 2: C
-    output reg [2:0] rd_slot,
-    output wire [4:0] rd_blk,      // S and T stores
-    output wire [4:0] rd_blk_c,    // C store
-    output wire [4:0] rd_blk_b,    // lane buffers (KeyGen e^)
-    input wire [95:0] rd_s_data,   // block of slot rd_slot of each store
+    // Store read. Stage A: the stores (and the KeyGen lane buffers) register
+    // the block address rd_blk while rd_en; R0 takes the block of slot
+    // rd_dslot of each store.
+    output wire [1:0] rd_dest,     // 0: S, 1: T, 2: C (block being issued)
+    output reg [2:0] rd_slot,      // slot of the block being issued
+    output wire rd_en,
+    output wire [4:0] rd_blk,
+    output reg [2:0] rd_dslot,     // slot of the block in stage A
+    input wire [95:0] rd_s_data,
     input wire [95:0] rd_t_data,
     input wire [87:0] rd_c_data,
-    input wire [5:0] rd_fill,      // fill of the store selected by rd_dest
-    input wire [95:0] bias_data,   // KeyGen e^[slot] block, added to the T store value
-    input wire [5:0] bias_fill,
+    input wire [5:0] rd_fill,      // fill of slot rd_slot of the store rd_dest
+    input wire [95:0] bias_data,   // KeyGen e^[rd_dslot] block, added to the T store value
+    input wire [5:0] bias_fill,    // fill and epoch of e^[rd_slot]
     input wire bias_ep,
 
     // Byte strings
@@ -42,10 +44,11 @@ module mlkem_out (
     input wire [255:0] key,
     input wire key_v,
 
-    // Hashed ek copy to the tap FIFO (KeyGen)
+    // Hashed ek copy to the tap FIFO (KeyGen). The copy (at most 196 words,
+    // ML-KEM-1024) fits the FIFO, which is emptied with go and takes nothing
+    // else in KeyGen, so the stream never waits for room.
     output wire fifo_push,
     output wire [63:0] fifo_din,
-    input wire fifo_full,
 
     // Result words
     output wire [63:0] m_tdata,
@@ -129,31 +132,39 @@ module mlkem_out (
     end
 
     assign rd_dest = sdest;
-    // Read addresses are registered copies of the next block index, one per
-    // store group, so the block counter does not fan out to every memory.
+    // Slot of the block counter, registered from its next value
     wire issue;
     wire [7:0] bcnt_nx = go ? 8'd0 : !active ? bcnt : seg_done ? 8'd0 : issue ? bcnt + 8'd1 : bcnt;
-    (* keep = "true" *) reg [4:0] blk_st;
-    (* keep = "true" *) reg [4:0] blk_c;
-    (* keep = "true" *) reg [4:0] blk_b;
-    always @(posedge clk) begin
-        blk_st <= bcnt_nx[4:0];
-        blk_c <= bcnt_nx[4:0];
-        blk_b <= bcnt_nx[4:0];
+    always @(posedge clk)
         rd_slot <= seg_d[4:2] + {1'b0, bcnt_nx[6:5]};
-    end
-    assign rd_blk = blk_st;
-    assign rd_blk_c = blk_c;
-    assign rd_blk_b = blk_b;
+    assign rd_blk = bcnt[4:0];
+
+    // Stage A (see the read pipeline below)
+    reg a_v;
+    reg a_reg;
+    reg a_bias;
+    reg [3:0] a_sd;
+    reg [1:0] a_dest;
+    reg [1:0] a_sreg;
+    reg [1:0] a_wsel;               // 64-bit word of the register value
 
     reg reg_ok;
-    reg [255:0] reg_val;
     always @(*) begin
         case (sreg)
-            2'd0: begin reg_ok = rho_v; reg_val = rho; end
-            2'd1: begin reg_ok = h_v; reg_val = h; end
-            2'd2: begin reg_ok = 1'b1; reg_val = z; end
-            default: begin reg_ok = key_v; reg_val = key; end
+            2'd0: reg_ok = rho_v;
+            2'd1: reg_ok = h_v;
+            2'd2: reg_ok = 1'b1;
+            default: reg_ok = key_v;
+        endcase
+    end
+    // Register value of the word in stage A (the values do not change once valid)
+    reg [255:0] reg_val;
+    always @(*) begin
+        case (a_sreg)
+            2'd0: reg_val = rho;
+            2'd1: reg_val = h;
+            2'd2: reg_val = z;
+            default: reg_val = key;
         endcase
     end
 
@@ -172,11 +183,12 @@ module mlkem_out (
     wire src_ok = (sk == SK_REG) ? reg_ok : blk_ok;
 
     // Read pipeline between the stores and the packer:
+    //   A   block address registered in the stores; segment fields of the block
     //   R0  blocks as read, one register per store, KeyGen e^ block, register word
     //   R1  block of the segment's store (or the register word)
     //   R2  KeyGen t^: t^ - e^ from the T store plus e^
     //   D   block in decoding order, in a two-entry register slice
-    // R0..R2 advance together whenever the slice can take a block (its
+    // A..R2 advance together whenever the slice can take a block (its
     // registered ready), so every stage is enabled by one flip-flop; the valid
     // flags carry the issue. The slice has room for the block in flight when
     // its ready falls.
@@ -255,15 +267,22 @@ module mlkem_out (
 
     always @(posedge clk) begin
         if (adv) begin
-            r0_reg <= (sk == SK_REG);
-            r0_bias <= use_bias;
-            r0_sd <= sd;
-            r0_dest <= sdest;
+            a_reg <= (sk == SK_REG);
+            a_bias <= use_bias;
+            a_sd <= sd;
+            a_dest <= sdest;
+            a_sreg <= sreg;
+            a_wsel <= bcnt[1:0];
+            rd_dslot <= rd_slot;
+            r0_reg <= a_reg;
+            r0_bias <= a_bias;
+            r0_sd <= a_sd;
+            r0_dest <= a_dest;
             r0_s <= rd_s_data;
             r0_t <= rd_t_data;
             r0_c <= rd_c_data;
             r0_add <= bias_data;
-            r0_word <= reg_val[{bcnt[1:0], 6'd0} +: 64];
+            r0_word <= reg_val[{a_wsel, 6'd0} +: 64];
             r1_reg <= r0_reg;
             r1_bias <= r0_bias;
             r1_sd <= r0_sd;
@@ -292,7 +311,7 @@ module mlkem_out (
     wire [63:0] pk_data;
     reg tap;                          // word belongs to the hashed ek copy (KeyGen)
     wire sl_ready;
-    wire out_ok = sl_ready && (!tap || !fifo_full);
+    wire out_ok = sl_ready;
 
     mlkem_pack u_pack (
         .clk(clk),
@@ -315,7 +334,7 @@ module mlkem_out (
         .rst_n(rst_n),
         .clr(go || kill),
         .s_allow(1'b1),
-        .s_valid(pk_valid && (!tap || !fifo_full)),
+        .s_valid(pk_valid),
         .s_data(pk_data),
         .s_ready(sl_ready),
         .m_valid(sl_valid),
@@ -326,7 +345,10 @@ module mlkem_out (
     assign fifo_push = fire && tap;
     assign fifo_din = pk_data;
     assign busy = active;
-    assign secrets_read = !active || (op != `MLKEM_OP_KEYGEN) || (seg >= 3'd4);
+    // KeyGen: the S store and the lane buffers are read in segments 0..3; the
+    // last of their blocks may still wait in stage A.
+    assign secrets_read = !active || (op != `MLKEM_OP_KEYGEN) || ((seg >= 3'd4) && !(a_v && !a_reg));
+    assign rd_en = adv;
 
     always @(posedge clk)
         tap <= ((fire ? ocnt + 10'd1 : ocnt) < tap_words);
@@ -337,6 +359,7 @@ module mlkem_out (
             seg <= 3'd0;
             bcnt <= 8'd0;
             ocnt <= 10'd0;
+            a_v <= 1'b0;
             r0_v <= 1'b0;
             r1_v <= 1'b0;
             r2_v <= 1'b0;
@@ -350,6 +373,7 @@ module mlkem_out (
                 seg <= 3'd0;
                 bcnt <= 8'd0;
                 ocnt <= 10'd0;
+                a_v <= 1'b0;
                 r0_v <= 1'b0;
                 r1_v <= 1'b0;
                 r2_v <= 1'b0;
@@ -357,7 +381,8 @@ module mlkem_out (
                 if (issue)
                     bcnt <= bcnt + 8'd1;
                 if (adv) begin
-                    r0_v <= issue;
+                    a_v <= issue;
+                    r0_v <= a_v;
                     r1_v <= r0_v;
                     r2_v <= r1_v;
                 end
