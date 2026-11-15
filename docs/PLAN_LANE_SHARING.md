@@ -12,26 +12,27 @@ area from ~58k LUT / ~42k FF (9 ntt4 lanes, PMAC 16 coef/cycle).
 | 768  | 2796   | 3523   | 4546   |
 | 1024 | 4387   | 5137   | 6523   |
 
-## Result (Vivado 2025.2.1, OOC, xc7a200tfbg676-3, 5 ns, 0 BRAM / 0 DSP)
+## Result (Vivado 2025.2.1, OOC, xc7a200tfbg676-3, 4 ns, 0 BRAM / 0 DSP)
 
 Default synthesis and implementation flow (`opt`, `place`, `phys_opt`,
-`route`), `constraint/mlkem.xdc` at 5 ns:
+`route`), `constraint/mlkem.xdc`:
 
-| LUT | of which memory | FF | Slices | WNS | Fmax | Power (vectorless) |
-|-----|-----------------|----|--------|-----|------|--------------------|
-| 30,660 | 4,971 | 19,171 | 9,361 | +0.067 ns | 202.7 MHz | 1.59 W |
+| Build | LUT | of which memory | FF | Slices | WNS | Fmax | Power (vectorless) |
+|-------|-----|-----------------|----|--------|-----|------|--------------------|
+| 4 ns (step 5) | 31,050 | 4,972 | 19,454 | 9,466 | +0.012 ns | 250.8 MHz | 1.97 W |
+| 5 ns (step 4) | 30,660 | 4,971 | 19,171 | 9,361 | +0.067 ns | 202.7 MHz | 1.59 W |
 
-Core cycles (`make perf`; the AXI top adds 2) and µs at 200 MHz:
+Core cycles (`make perf`; the AXI top adds 2) and µs at 250 MHz:
 
 | Set  | KeyGen        | Encaps        | Decaps         | Paper 15 (µs)      | Paper 13 (µs)      |
 |------|---------------|---------------|----------------|--------------------|--------------------|
-| 512  | 1272 (6.37)   | 1884 (9.43)   | 2646 (13.24)   | 6.7 / 9.9 / 13.7   | 8.1 / 12.1 / 18.0  |
-| 768  | 1836 (9.19)   | 2555 (12.79)  | 3906 (19.54)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
-| 1024 | 2591 (12.97)  | 3362 (16.82)  | 4687 (23.45)   | 19.3 / 22.6 / 28.7 | 20.7 / 27.4 / 36.0 |
+| 512  | 1277 (5.11)   | 1891 (7.56)   | 2657 (10.63)   | 6.7 / 9.9 / 13.7   | 8.1 / 12.1 / 18.0  |
+| 768  | 1842 (7.37)   | 2566 (10.26)  | 3922 (15.69)   | 12.3 / 15.5 / 20.0 | 13.9 / 18.4 / 26.1 |
+| 1024 | 2605 (10.42)  | 3380 (13.52)  | 4711 (18.84)   | 19.3 / 22.6 / 28.7 | 20.7 / 27.4 / 36.0 |
 
-Every point is faster than both papers already at 200 MHz. AT and power stay
-above Paper 15 (4 DSP, 270 MHz); with 0 DSP / 0 BRAM the multipliers and
-the stores are LUTs.
+Every point is 22-46 % faster than Paper 15 and 37-51 % faster than Paper 13.
+AT and power stay above Paper 15 (4 DSP, 270 MHz); with 0 DSP / 0 BRAM the
+multipliers and the stores are LUTs.
 
 ## Status
 
@@ -128,6 +129,37 @@ total LUT in Vivado; FF stays below 20k. Remaining large blocks (hierarchical
 Yosys): Keccak sponge 6.9k LUT, two engines 2 x 4.9k (ntt4 2.4k each), PMAC
 4.0k, input 2.1k, output 2.0k, sampler 1.4k, core glue 5.0k. Going further
 (one engine, or a two-butterfly NTT) breaks the Decaps-512 budget.
+
+## Step 5: timing to 4 ns (250 MHz)
+
+At 3.6 ns the 5 ns build reached 4.11 ns; three quarters of every critical
+path was routing. The worst paths all had the same shape: a far register,
+an address select, a fanout-96 net into a LUTRAM, the slot / source select
+and the reader's register (three long nets in one cycle). Changes:
+
+- Store reads take one cycle: `mlkem_poly_ram` `RREG = 1` registers the read
+  address beside the memory (kept per memory, so equal addresses are not
+  merged). The S, T, C stores and every lane buffer use it.
+  - Engines: one more read stage (`na`, `la_v`, `cbd_a`), the core read
+    follows the issue by a cycle, unload drain 12.
+  - PMAC: sends the stage-0 block (`b[7:2]`), so the memory copy is its
+    stage 1 (no extra latency).
+  - Output engine: stage A (the stores take `bcnt` while `adv`), the data
+    slot `rd_dslot` follows it; `secrets_read` waits until no store block is
+    in stage A.
+- Noise count of each engine's lane registered (like the fills).
+- Keccak: the state bit's LUT takes the round output or the bit XOR its
+  block bit (input net kept, clear and lane enables on the register reset
+  and enables, iota on lane 0's own chi operand): 3 LUT levels.
+- Rejection precount: 4 stages (popcount of 7, pairs, sum); uncertain XOF
+  blocks are decided one cycle later.
+- Sampler bank hit: rank below the chunk total (ranks are 0 .. total - 1).
+- CBD prefetch register outside the init reset; dispatcher picks one-hot;
+  PMAC `g1_cur` registered with the group; AXI buffer address one register
+  per byte lane; the KeyGen ek tap no longer waits for FIFO room (196 words
+  at most, the FIFO holds 256).
+
+Cycles change by 0..0.6% (result table at the top).
 
 ## Area picture (Vivado, old 9-lane single-butterfly build)
 
