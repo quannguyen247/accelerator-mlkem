@@ -106,6 +106,7 @@ module mlkem_out (
     endfunction
 
     reg [1:0] sk;
+    reg [2:0] sslot0;    // first slot of the segment
     reg [3:0] sd;
     reg [1:0] sdest;
     reg [1:0] sreg;      // 0: rho, 1: h, 2: z, 3: key
@@ -117,11 +118,12 @@ module mlkem_out (
     wire seg_done = active && (sk != SK_END) && (bcnt == seg_blocks);
     wire [2:0] seg_nx = go ? 3'd0 : seg_done ? seg + 3'd1 : seg;
     wire [15:0] seg_d = seg_of(op, seg_nx, k);
-    // snsl (slot count) and sslot0 (first slot) are used from seg_d directly.
+    // snsl (slot count) is used from seg_d directly.
     always @(posedge clk) begin
         sk <= seg_d[15:14];
         sd <= seg_d[13:10];
         sdest <= seg_d[9:8];
+        sslot0 <= seg_d[4:2];
         sreg <= seg_d[1:0];
         use_bias <= (op == `MLKEM_OP_KEYGEN) && (seg_d[15:14] == SK_VAL) && (seg_d[9:8] == 2'd1);
         seg_blocks <= (seg_d[15:14] == SK_REG) ? 8'd4 : {seg_d[7:5], 5'd0};
@@ -132,11 +134,12 @@ module mlkem_out (
     end
 
     assign rd_dest = sdest;
-    // Slot of the block counter, registered from its next value
+    // Slot of the block counter, registered from its next value: the first
+    // slot of a new segment (the counter restarts), else this segment's.
     wire issue;
     wire [7:0] bcnt_nx = go ? 8'd0 : !active ? bcnt : seg_done ? 8'd0 : issue ? bcnt + 8'd1 : bcnt;
     always @(posedge clk)
-        rd_slot <= seg_d[4:2] + {1'b0, bcnt_nx[6:5]};
+        rd_slot <= (go || seg_done) ? seg_d[4:2] : sslot0 + {1'b0, bcnt_nx[6:5]};
     assign rd_blk = bcnt[4:0];
 
     // Stage A (see the read pipeline below)
@@ -148,13 +151,21 @@ module mlkem_out (
     reg [1:0] a_sreg;
     reg [1:0] a_wsel;               // 64-bit word of the register value
 
+    // Valid flags of the register values, registered: they only rise within
+    // a request (cleared with go), so a one-cycle-old flag is a safe answer.
+    reg rho_v_q, h_v_q, key_v_q;
+    always @(posedge clk) begin
+        rho_v_q <= !go && rho_v;
+        h_v_q <= !go && h_v;
+        key_v_q <= !go && key_v;
+    end
     reg reg_ok;
     always @(*) begin
         case (sreg)
-            2'd0: reg_ok = rho_v;
-            2'd1: reg_ok = h_v;
+            2'd0: reg_ok = rho_v_q;
+            2'd1: reg_ok = h_v_q;
             2'd2: reg_ok = 1'b1;
-            default: reg_ok = key_v;
+            default: reg_ok = key_v_q;
         endcase
     end
     // Register value of the word in stage A (the values do not change once valid)

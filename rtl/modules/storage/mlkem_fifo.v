@@ -5,9 +5,10 @@
 // wrap bit, so a push or pop only increments one pointer.
 // The write port is registered: an accepted push is written one cycle later,
 // so the memory's write enable, address and data come from flip-flops.
-// Full is a registered flag on the words accepted (wptr): it rises when one
-// free word is left, one cycle after the level got there, so at most one more
-// push arrives and the FIFO never overflows. Empty is a registered flag on
+// Full is a registered flag on the words accepted (wptr): it rises when two
+// free words are left, one cycle after the level got there; the writer sees
+// it through one more register, so at most two more pushes arrive and the
+// FIFO never overflows. Empty is a registered flag on
 // the words written (wptr_wr), exact: both sides see a flip-flop instead of
 // a pointer compare.
 module mlkem_fifo #(
@@ -59,7 +60,7 @@ module mlkem_fifo #(
             empty_reg <= 1'b1;
         end else begin
             wr_q <= do_push;
-            full_reg <= (level >= (1 << AW) - 1);
+            full_reg <= (level >= (1 << AW) - 2);
             if (wr_q)
                 empty_reg <= 1'b0;
             else if (do_pop)

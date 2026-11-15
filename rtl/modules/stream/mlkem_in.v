@@ -70,6 +70,7 @@ module mlkem_in (
     // Port and framing
     reg on;
     reg [9:0] acc_left;
+    reg acc_nz;                     // acc_left != 0, registered
     wire [9:0] tot_words = (op == `MLKEM_OP_ENCAPS) ? {k, 4'd0} * 2'd3 + 10'd4 :
                            {k, 5'd0} * 2'd3 + 10'd12 + {4'd0, du, 2'd0} * k + {4'd0, dv, 2'd0};
     wire q_valid;
@@ -80,7 +81,7 @@ module mlkem_in (
         .clk(clk),
         .rst_n(rst_n),
         .clr(go || kill),
-        .s_allow(on && (acc_left != 10'd0)),
+        .s_allow(on && acc_nz),
         .s_valid(s_tvalid),
         .s_data(s_tdata),
         .s_ready(s_tready),
@@ -153,7 +154,11 @@ module mlkem_in (
     wire up_valid;
     wire [95:0] up_raw;
     wire [95:0] up_vals;
-    wire want = active && seg_more_reg && (!stap || !fifo_full);
+    // FIFO full, registered here (the FIFO leaves room for it)
+    reg fifo_full_q;
+    always @(posedge clk)
+        fifo_full_q <= fifo_full;
+    wire want = active && seg_more_reg && (!stap || !fifo_full_q);
     assign q_pop = want && up_ready;
     wire pop = q_valid && q_pop;
 
@@ -204,6 +209,11 @@ module mlkem_in (
         end
     end
 
+    // The decoded block is registered every cycle (no enable): it is used
+    // only in the cycle after up_valid (bv). Byte strings (d = 8) pass raw.
+    always @(posedge clk)
+        b_vals <= up_vals;
+
     always @(posedge clk) begin
         {sk, sd, sdest, sslot0, sreg, stap, schk} <=
             {seg_d[17:16], seg_d[15:12], seg_d[11:10], seg_d[6:4], seg_d[3:2], seg_d[1], seg_d[0]};
@@ -213,6 +223,7 @@ module mlkem_in (
         if (!rst_n || kill) begin
             on <= 1'b0;
             acc_left <= 10'd0;
+            acc_nz <= 1'b0;
             active <= 1'b0;
             seg <= 3'd0;
             bcnt <= 8'd0;
@@ -242,8 +253,10 @@ module mlkem_in (
             end
 
             // Port side: words still to accept
-            if (s_acc)
+            if (s_acc) begin
                 acc_left <= acc_left - 10'd1;
+                acc_nz <= (acc_left != 10'd1);
+            end
 
             if (active && up_valid) begin
                 bv <= 1'b1;
@@ -254,7 +267,6 @@ module mlkem_in (
                 b_slot <= sslot0 + {1'b0, bcnt[6:5]};
                 b_blk <= bcnt[4:0];
                 b_sreg <= sreg;
-                b_vals <= up_vals;          // byte strings (d = 8) pass raw
             end
             if (bv) begin
                 if (!b_reg_seg) begin
@@ -302,6 +314,7 @@ module mlkem_in (
             if (go) begin
                 on <= (op != `MLKEM_OP_KEYGEN);
                 acc_left <= (op != `MLKEM_OP_KEYGEN) ? tot_words : 10'd0;
+                acc_nz <= (op != `MLKEM_OP_KEYGEN);
                 active <= (op != `MLKEM_OP_KEYGEN);
                 seg <= 3'd0;
                 bcnt <= 8'd0;

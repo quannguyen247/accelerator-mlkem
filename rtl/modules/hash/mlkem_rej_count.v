@@ -1,7 +1,8 @@
 `timescale 1ns / 1ps
 
 // Number of SampleNTT candidates below q in a full SHAKE128 block (112
-// candidates), four registered stages. Lets the hash engine decide at the
+// candidates), four registered stages: candidate checks, counts of 7, sums
+// of four counts, total. Lets the hash engine decide at the
 // squeeze handshake whether this block finishes the polynomial.
 module mlkem_rej_count (
     input wire clk,
@@ -11,7 +12,7 @@ module mlkem_rej_count (
 
     reg [111:0] ok;
     reg [2:0] pc7 [0:15];
-    reg [3:0] part [0:7];
+    reg [4:0] part [0:3];
     integer i, g;
 
     // Number of accepted candidates in a group of 7
@@ -32,10 +33,9 @@ module mlkem_rej_count (
         end
         for (g = 0; g < 16; g = g + 1)
             pc7[g] <= count7(ok[7*g +: 7]);
-        for (g = 0; g < 8; g = g + 1)
-            part[g] <= {1'b0, pc7[2*g]} + {1'b0, pc7[2*g+1]};
-        cnt <= {3'd0, part[0]} + {3'd0, part[1]} + {3'd0, part[2]} + {3'd0, part[3]} +
-               {3'd0, part[4]} + {3'd0, part[5]} + {3'd0, part[6]} + {3'd0, part[7]};
+        for (g = 0; g < 4; g = g + 1)
+            part[g] <= {2'd0, pc7[4*g]} + {2'd0, pc7[4*g+1]} + {2'd0, pc7[4*g+2]} + {2'd0, pc7[4*g+3]};
+        cnt <= {2'd0, part[0]} + {2'd0, part[1]} + {2'd0, part[2]} + {2'd0, part[3]};
     end
 
 endmodule

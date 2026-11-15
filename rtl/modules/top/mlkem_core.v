@@ -455,8 +455,16 @@ module mlkem_core (
     wire [8:0] cand = pend & rdy_q;
     wire e0_free = !e_busy[0] && !jst[0];
     wire e1_free = !e_busy[1] && !jst[1];
-    wire [8:0] pk0 = e0_free ? pick(cand & LMASK0) : 9'd0;
-    wire [8:0] pk1 = e1_free ? pick(cand & LMASK1 & ~{pk0[8], 8'd0}) : 9'd0;
+    // Candidates of each engine; engine 1 sees lane 8 only if engine 0 does
+    // not take it. The picks load lsel; their valid (any candidate) is
+    // formed apart, so the register enables do not wait for the pick.
+    wire [8:0] cd0 = cand & LMASK0;
+    wire e0_l8 = e0_free && cd0[8] && (cd0[7:0] == 8'd0);
+    wire [8:0] cd1 = cand & LMASK1 & ~{e0_l8, 8'd0};
+    wire pk0_v = e0_free && (cd0 != 9'd0);
+    wire pk1_v = e1_free && (cd1 != 9'd0);
+    wire [8:0] pk0 = pick(cd0);
+    wire [8:0] pk1 = pick(cd1);
 
     integer de, dl;
     always @(posedge clk) begin
@@ -494,7 +502,7 @@ module mlkem_core (
                         end
                     end
                 end
-                if (pk0 != 9'd0) begin
+                if (pk0_v) begin
                     lsel[0] <= pk0;
                     csel[0] <= cslot_of(pk0);
                     jst[0] <= 1'b1;
@@ -505,7 +513,7 @@ module mlkem_core (
                             pend[dl] <= 1'b0;
                     e_job[0] <= 1'b1;
                 end
-                if (pk1 != 9'd0) begin
+                if (pk1_v) begin
                     lsel[1] <= pk1;
                     csel[1] <= cslot_of(pk1);
                     jst[1] <= 1'b1;
@@ -732,7 +740,10 @@ module mlkem_core (
     always @(posedge clk)
         lanes_idle <= (e_busy == {NENG{1'b0}}) && (x_busy == 9'd0) && (pend == 9'd0) &&
                       (jst == {NENG{1'b0}}) && (e_job == {NENG{1'b0}});
-    wire fin_v = (op_r == `MLKEM_OP_DECAPS) && computed && kbar_v && kk_v;
+    // Decaps key valid, registered (cleared with go, like its inputs)
+    reg fin_v;
+    always @(posedge clk)
+        fin_v <= !go && !kill && (op_r == `MLKEM_OP_DECAPS) && computed && kbar_v && kk_v;
     wire [255:0] k_final = diff_any ? kbar : kk;
     reg [5:0] out_rd_fill;
     always @(*) begin

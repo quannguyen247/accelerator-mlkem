@@ -511,17 +511,24 @@ module mlkem_lane (
         end
     endgenerate
 
+    // Compare in two steps: the four 11-bit fields, then the verdict.
+    reg cmp_v;
+    reg [3:0] ne_q;
     always @(posedge clk) begin
+        for (i = 0; i < 4; i = i + 1)
+            ne_q[i] <= (cq6[11*i +: 11] != cr6[11*i +: 11]);
         if (!rst_n || kill) begin
             mp_we <= 1'b0;
             c_we <= 1'b0;
+            cmp_v <= 1'b0;
             diff <= 1'b0;
         end else begin
             mp_we <= v6 && posw;
+            c_we <= v6 && ul_noise && !jd_cmp;
+            cmp_v <= v6 && ul_noise && jd_cmp;
             if (go)
                 diff <= 1'b0;
-            c_we <= v6 && ul_noise && !jd_cmp;
-            if (v6 && ul_noise && jd_cmp && (cq6 != cr6))
+            else if (cmp_v && (ne_q != 4'd0))
                 diff <= 1'b1;
         end
         c_wdata <= cq6;

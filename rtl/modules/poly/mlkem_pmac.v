@@ -192,6 +192,7 @@ module mlkem_pmac (
     reg jlast;                      // the term in progress is the group's last (j == k - 1)
     reg [2:0] cur_oh;               // one-hot of cur
     reg g1_cur;                     // g1_q[cur]
+    reg [7:0] bp_nx, bp1_nx;        // bp, bp1 of cur after the group
     reg [1:0] c0, c1, c2;           // pair order of the next start
     reg nxt_v;
     reg [1:0] nxt_p;
@@ -314,13 +315,15 @@ module mlkem_pmac (
                     cur_oh <= 3'b001 << nxt_p;
                     g1_cur <= g1_q[nxt_p];
                     b_grp <= nxt_b;
+                    bp_nx <= nxt_b + (g1_q[nxt_p] ? 8'd1 : 8'd2);
+                    bp1_nx <= nxt_b + (g1_q[nxt_p] ? 8'd2 : 8'd4);
                 end
                 if (last_j) begin
                     in_grp <= 1'b0;
                     j <= 3'd0;
                     jlast <= 1'b0;
-                    bp[cur] <= b_grp + (g1_cur ? 8'd1 : 8'd2);
-                    bp1[cur] <= b_grp + (g1_cur ? 8'd2 : 8'd4);
+                    bp[cur] <= bp_nx;
+                    bp1[cur] <= bp1_nx;
                     inc_q[cur] <= 1'b1;
                     groups <= groups + (g1_cur ? 9'd1 : 9'd2);
                     if (groups + (g1_cur ? 9'd1 : 9'd2) == total) begin
