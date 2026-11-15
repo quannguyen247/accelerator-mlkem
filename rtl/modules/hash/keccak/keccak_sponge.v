@@ -17,12 +17,6 @@ module keccak_sponge #(
     input wire absorb_last,
     input wire [`KECCAK_RATE_BITS-1:0] absorb_in,
     output wire absorb_ready,
-    // Word absorb: while absorbing, wx_word is XORed into the rate lanes
-    // set in wx_en (one at a time) without starting the permutation; the
-    // block handshake then XORs absorb_in (the rest of the block) and starts.
-    input wire [`KECCAK_NUM_LANES-1:0] wx_en,
-    input wire [63:0] wx_word,
-    input wire wx_v,                     // registered: some wx_en bit is set
 
     // Squeeze control
     input wire squeeze_ready,
@@ -68,19 +62,16 @@ module keccak_sponge #(
     wire [`KECCAK_STATE_WIDTH-1:0] keccak_state;
     wire perm_start = absorb_fire || (curr_state == ST_START);
     wire perm_last;
-    wire wx_any = wx_v && (curr_state == ST_ABSORB) && !absorb_valid;
-    wire [`KECCAK_NUM_LANES-1:0] lane_en = (curr_state != ST_ABSORB) ? {`KECCAK_NUM_LANES{1'b0}} :
-                                           wx_any ? (wx_en & absorb_lanes_reg) : absorb_lanes_reg;
+    wire [`KECCAK_NUM_LANES-1:0] lane_en = (curr_state == ST_ABSORB) ? absorb_lanes_reg :
+                                                                       {`KECCAK_NUM_LANES{1'b0}};
 
     keccak_permutation u_keccak_perm (
         .clk(clk),
         .rst_n(rst_n),
         .clear(curr_state == ST_IDLE),
         .in_valid(perm_start),
-        .xor_only(wx_any),
         .xor_lane_en(lane_en),
-        .xor_in(wx_any ? {`KECCAK_NUM_LANES{wx_word}} :
-                {{(`KECCAK_STATE_WIDTH - `KECCAK_RATE_BITS){1'b0}}, absorb_in}),
+        .xor_in({{(`KECCAK_STATE_WIDTH - `KECCAK_RATE_BITS){1'b0}}, absorb_in}),
         .last_round(perm_last),
         .state_out(keccak_state)
     );

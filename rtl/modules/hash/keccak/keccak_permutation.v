@@ -6,7 +6,6 @@ module keccak_permutation (
     input wire rst_n,
     input wire clear,
     input wire in_valid,
-    input wire xor_only,                 // XOR the enabled lanes without starting
     // Lanes of xor_in XORed into the state with in_valid. The enable acts on
     // the register enables, so a state bit's input is the round output or
     // the bit XOR its block bit, nothing else.
@@ -63,12 +62,10 @@ module keccak_permutation (
     end
 
     // State. A bit's input is the round output (rounds) or the bit XOR its
-    // block bit (idle: a block, in_valid, which starts the rounds, or a single
-    // word, xor_only, into the enabled lanes), so the round logic and the
-    // input share one LUT. The reset and clear (the sponge is idle, never with
-    // a block or a word) act on the register reset, the lane enables on the
-    // register enables.
-    wire take = in_valid || xor_only;
+    // block bit (idle: a block, in_valid, which starts the rounds), so the
+    // round logic and the input share one LUT. The reset and clear (the
+    // sponge is idle, never with a block) act on the register reset, the
+    // lane enables on the register enables.
     // Kept as one net per bit: the sponge's input select stays in its own
     // LUT and the state bit's LUT sees a single input bit (with the three
     // chi operands, the state bit and idle: six inputs).
@@ -78,7 +75,7 @@ module keccak_permutation (
         for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1) begin
             if (!rst_n || (idle && clear))
                 state_out[64*l +: 64] <= 64'd0;
-            else if (!idle || (take && xor_lane_en[l]))
+            else if (!idle || (in_valid && xor_lane_en[l]))
                 state_out[64*l +: 64] <= idle ? (state_out[64*l +: 64] ^ xin[64*l +: 64]) :
                                                 round_out[64*l +: 64];
         end

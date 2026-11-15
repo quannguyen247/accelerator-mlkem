@@ -45,9 +45,6 @@ module keccak_top (
     );
 
     keccak_sponge u_sponge (
-        .wx_en({`KECCAK_NUM_LANES{1'b0}}),
-        .wx_word(64'd0),
-        .wx_v(1'b0),
         .clk(clk),
         .rst_n(rst_n),
         .mode(mode),

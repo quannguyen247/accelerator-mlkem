@@ -241,11 +241,11 @@ module mlkem_hash (
     reg absorb_valid;
     reg absorb_last;
     // Long-job pad block: the suffix byte in word pad_w and the final bit
-    // of the rate (136-byte rate), XORed with the last block's handshake.
+    // of the rate (136-byte rate), ORed into the last block.
     reg pad_v;
     reg [4:0] pad_w;
     wire [1343:0] pad_blk;
-    // Word absorb strobe per rate lane and the word (registered taken word)
+    // Word write strobe per rate lane of cap and the word (registered taken word)
     reg [20:0] blk_word_reg;
     reg blk_word_v;                 // some blk_word_reg bit is set
     reg [63:0] word_reg;
@@ -313,10 +313,7 @@ module mlkem_hash (
         .mode(kmode),
         .absorb_valid(absorb_valid),
         .absorb_last(absorb_last),
-        .absorb_in(is_long ? pad_blk : sblk),
-        .wx_en({4'd0, blk_word_reg}),
-        .wx_word(word_reg),
-        .wx_v(blk_word_v),
+        .absorb_in(is_long ? (cap | pad_blk) : sblk),
         .absorb_ready(absorb_ready),
         .squeeze_ready(squeeze_ready),
         .squeeze_last(squeeze_last),
@@ -336,9 +333,15 @@ module mlkem_hash (
     reg blk_full;
     wire words_left = (rem != 9'd0);
     wire use_z = (jtype == J_J) && !tc[2];
-    // Words are XORed into the state, so they are taken only while the
-    // sponge waits for the block (not while it permutes the previous one).
-    wire want_word = (curr_state == ST_ABS) && is_long && !blk_full && words_left && absorb_ready;
+    // Words are collected in cap, so they are taken also while the sponge
+    // permutes the previous block. cap is free in a long job once the
+    // sampler and the noise writer are done with the last XOF / PRF block;
+    // it is then cleared (cap_clr, also after every block handshake) before
+    // the first word lands (cap_rdy).
+    wire cap_free = !smp_busy && !nw_busy;
+    reg cap_rdy;
+    reg cap_clr;
+    wire want_word = (curr_state == ST_ABS) && is_long && !blk_full && words_left && cap_rdy;
     assign fifo_pop = want_word && !use_z && !fifo_empty;
     wire got_word = want_word && (use_z || !fifo_empty);
     wire [63:0] word_in = use_z ? z_in[{tc[1:0], 6'd0} +: 64] : fifo_data;
@@ -346,10 +349,11 @@ module mlkem_hash (
     // block, so the FIFO read drives 64 flip-flops instead of the whole block.
     // The block is complete in the cycle absorb_valid rises (no extra latency).
 
-    // Long jobs: each taken word is XORed into its rate lane of the Keccak
-    // state (blk_word_reg strobe, one cycle after the take); the block
-    // handshake then XORs the pad block (suffix byte after the last word,
-    // final bit of the 136-byte rate) and starts the permutation. The word
+    // Long jobs: each taken word is written into its rate lane of cap
+    // (blk_word_reg strobe, one cycle after the take); the block handshake
+    // absorbs cap with the pad
+    // block (suffix byte after the last word, final bit of the 136-byte rate)
+    // and starts the permutation, while the next block is collected. The word
     // counts of H(ek) and J(z||c) are never a multiple of 17, so the last
     // block always has room for the suffix. Short jobs absorb sblk directly
     // (its inputs are stable from the job start to the absorb).
@@ -418,6 +422,7 @@ module mlkem_hash (
     end
 
     // Hash FSMD update
+    integer cw;
     always @(posedge clk) begin
         if (!rst_n || kill) begin
             curr_state <= ST_IDLE;
@@ -441,8 +446,11 @@ module mlkem_hash (
             h_chk_reg <= 1'b0;
             blk_full <= 1'b0;
             sv_age <= 3'd0;
+            cap_rdy <= 1'b0;
+            cap_clr <= 1'b0;
         end else begin
             curr_state <= next_state;
+            cap_clr <= 1'b0;
             k_rst <= 1'b0;
             k_start <= 1'b0;
             smp_load <= 1'b0;
@@ -530,6 +538,7 @@ module mlkem_hash (
                     end
                 end
                 ST_NEXT: begin
+                    cap_rdy <= 1'b0;
                     tc <= 3'd0;
                     rem <= msg_words;
                     wc <= 5'd0;
@@ -554,6 +563,10 @@ module mlkem_hash (
                         if (absorb_valid && absorb_ready)
                             absorb_valid <= 1'b0;
                     end else begin
+                        if (!cap_rdy && cap_free) begin
+                            cap_rdy <= 1'b1;
+                            cap_clr <= 1'b1;
+                        end
                         if (got_word) begin
                             word_reg <= word_in;
                             wc <= wc + 5'd1;
@@ -571,6 +584,7 @@ module mlkem_hash (
                             absorb_valid <= 1'b0;
                             blk_full <= 1'b0;
                             wc <= 5'd0;
+                            cap_clr <= 1'b1;
                         end
                     end
                 end
@@ -619,6 +633,14 @@ module mlkem_hash (
                 end
                 default: ;
             endcase
+
+            if (cap_clr) begin
+                cap <= 1344'd0;
+            end else begin
+                for (cw = 0; cw < 17; cw = cw + 1)
+                    if (blk_word_reg[cw])
+                        cap[64*cw +: 64] <= word_reg;
+            end
 
             if (scrub) begin
                 pseed <= 256'd0;
