@@ -50,36 +50,37 @@ module keccak_permutation (
         endcase
     end
 
-    integer l;
+    wire idle = (curr_state == ST_IDLE);
+
     always @(posedge clk) begin
         if (!rst_n) begin
             curr_state <= ST_IDLE;
-            state_out <= {`KECCAK_STATE_WIDTH{1'b0}};
         end else begin
             curr_state <= next_state;
-            case (curr_state)
-                ST_IDLE: begin
-                    // clear (the sponge is idle) never comes with a block or a
-                    // word, so it is tested first: the state reset then depends
-                    // on state registers only. A block (in_valid, starts the
-                    // rounds) or a single word (xor_only) is XORed into the
-                    // enabled lanes through one input path.
-                    if (clear) begin
-                        state_out <= {`KECCAK_STATE_WIDTH{1'b0}};
-                    end else if (in_valid || xor_only) begin
-                        for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1)
-                            if (xor_lane_en[l])
-                                state_out[64*l +: 64] <= state_out[64*l +: 64] ^ xor_in[64*l +: 64];
-                        if (in_valid)
-                            round_ctr <= 5'd0;
-                    end
-                end
-                default: begin
-                    state_out <= round_out;
-                    if (!last_round)
-                        round_ctr <= round_ctr + 5'd1;
-                end
-            endcase
+            if (idle ? in_valid : !last_round)
+                round_ctr <= idle ? 5'd0 : round_ctr + 5'd1;
+        end
+    end
+
+    // State. A bit's input is the round output (rounds) or the bit XOR its
+    // block bit (idle: a block, in_valid, which starts the rounds, or a single
+    // word, xor_only, into the enabled lanes), so the round logic and the
+    // input share one LUT. The reset and clear (the sponge is idle, never with
+    // a block or a word) act on the register reset, the lane enables on the
+    // register enables.
+    wire take = in_valid || xor_only;
+    // Kept as one net per bit: the sponge's input select stays in its own
+    // LUT and the state bit's LUT sees a single input bit (with the three
+    // chi operands, the state bit and idle: six inputs).
+    (* keep = "true" *) wire [`KECCAK_STATE_WIDTH-1:0] xin = xor_in;
+    integer l;
+    always @(posedge clk) begin
+        for (l = 0; l < `KECCAK_NUM_LANES; l = l + 1) begin
+            if (!rst_n || (idle && clear))
+                state_out[64*l +: 64] <= 64'd0;
+            else if (!idle || (take && xor_lane_en[l]))
+                state_out[64*l +: 64] <= idle ? (state_out[64*l +: 64] ^ xin[64*l +: 64]) :
+                                                round_out[64*l +: 64];
         end
     end
 
@@ -160,15 +161,15 @@ module keccak_chi_iota (
             B[i] = state_in[(i * 64) +: 64];
         end
 
-        // A'''[x,y] = B[x,y] ^ ((~B[x+1,y]) & B[x+2,y]) (Chi)
+        // A'''[x,y] = B[x,y] ^ ((~B[x+1,y]) & B[x+2,y]) (Chi), with
+        // A''''[0,0] = A'''[0,0] ^ RC[r] (Iota) applied to the own operand of
+        // lane 0 (XOR is linear), so the constant joins the theta LUT.
         for (y = 0; y < 5; y = y + 1) begin
             for (x = 0; x < 5; x = x + 1) begin
-                A[x + (5 * y)] = B[x + (5 * y)] ^ ((~B[((x + 1) % 5) + (5 * y)]) & B[((x + 2) % 5) + (5 * y)]);
+                A[x + (5 * y)] = ((x + 5 * y == 0) ? (B[0] ^ round_const) : B[x + (5 * y)]) ^
+                                 ((~B[((x + 1) % 5) + (5 * y)]) & B[((x + 2) % 5) + (5 * y)]);
             end
         end
-
-        // A''''[0,0] = A'''[0,0] ^ RC[r] (Iota)
-        A[0] = A[0] ^ round_const;
         for (i = 0; i < `KECCAK_NUM_LANES; i = i + 1) begin
             state_out[(i * 64) +: 64] = A[i];
         end

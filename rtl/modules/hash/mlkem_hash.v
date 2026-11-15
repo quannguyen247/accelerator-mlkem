@@ -261,7 +261,7 @@ module mlkem_hash (
 
     // Squeeze handshake, decided in the cycle the block appears.
     wire [6:0] pc;
-    reg [2:0] sv_age;               // cycles the block has waited (saturates at 4)
+    reg [2:0] sv_age;               // cycles the block has waited (saturates at 5)
     reg [1:0] sq_blk;
     reg xof_first;
     reg xof_new_q;
@@ -277,8 +277,8 @@ module mlkem_hash (
         xof_rem <= 9'd256 - cnt_eff;
         xof_sure_more <= (cnt_eff < 9'd144);
     end
-    // The precount is valid from the third waiting cycle; its compare with
-    // rem is registered, so an uncertain block is decided in the fourth.
+    // The precount is valid from the fourth waiting cycle; its compare with
+    // rem is registered, so an uncertain block is decided in the fifth.
     reg xof_last;
     always @(posedge clk)
         xof_last <= ({2'd0, pc} >= xof_rem);
@@ -287,7 +287,7 @@ module mlkem_hash (
         case (jtype)
             J_H: sq_ok = (op != `MLKEM_OP_DECAPS) || h_in_v;
             J_PRF: sq_ok = !nw_busy && !smp_busy;
-            J_XOF: sq_ok = !smp_busy && !nw_busy && (xof_sure_more || sv_age == 3'd4);
+            J_XOF: sq_ok = !smp_busy && !nw_busy && (xof_sure_more || sv_age == 3'd5);
             default: sq_ok = 1'b1;
         endcase
     end
@@ -512,7 +512,7 @@ module mlkem_hash (
 
             if (!squeeze_valid || sq_fire || curr_state != ST_SQZ)
                 sv_age <= 3'd0;
-            else if (sv_age != 3'd4)
+            else if (sv_age != 3'd5)
                 sv_age <= sv_age + 3'd1;
 
             case (curr_state)
