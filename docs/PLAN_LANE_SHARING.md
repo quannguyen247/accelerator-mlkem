@@ -19,6 +19,8 @@ Default synthesis and implementation flow (`opt`, `place`, `phys_opt`,
 
 | Build | LUT | of which memory | FF | Slices | WNS | Fmax | Power (vectorless) |
 |-------|-----|-----------------|----|--------|-----|------|--------------------|
+| 4 ns (step 6) | 28,488 | 4,971 | 19,788 | - | +0.086 ns | 251.4 MHz | 1.99 W |
+| 4 ns (step 5b, separate absorb block) | 29,915 | 4,336 | 20,632 | - | +0.073 ns | 251.2 MHz | 1.83 W |
 | 4 ns (step 5) | 31,430 | 4,972 | 19,429 | 9,415 | +0.004 ns | 250.3 MHz | 1.97 W |
 | 5 ns (step 4) | 30,660 | 4,971 | 19,171 | 9,361 | +0.067 ns | 202.7 MHz | 1.59 W |
 
@@ -242,3 +244,31 @@ Expected after step 2 with 2 lanes (model estimate, 227 MHz):
 
 1. Run `make lint`, `make test`, `make test-axi` and `make perf`.
 2. Then the user runs Vivado OOC implementation for LUT, FF, Fmax and power.
+
+## Step 6: area trims at 4 ns (cycles unchanged, every `make perf` point identical)
+
+- Shared secrets in the input engine's registers: K (G of Encaps / Decaps)
+  in `h`, K-bar (J of Decaps) in `rho`, both already absorbed by then; the
+  hash's `kk` / `kbar` (512 FF) are gone, the output engine maps its key
+  segment to `rho` / `h` (`key_rho`), `rho` / `h` are cleared with DONE.
+- Engine core write data is `l2_val` itself (zero outside LOAD), `ext_din`
+  removed.
+- Noise words are formed from the sampler's 96-bit chunk register (two
+  chunks per three words, same timing) instead of a 21:1 select of `cap`.
+- KeyGen s^ is read for dk from the vector lane buffers; the S store has the
+  input as its only writer, and the input's block register is zero outside
+  its store writes, so the S scrub needs no data select.
+- Encaps writes its compressed u / v to its own row / scalar lane buffer
+  (epoch 1); the output engine reads the ciphertext there (one read path and
+  one register with the KeyGen e^ bias). The C store holds only the Decaps
+  ciphertext. An Encaps scrub keeps those buffers (ciphertext only; a kill
+  still clears them).
+- `x7` is zero outside unload groups: the vector buffers take it directly.
+
+Remaining area (post-route): Keccak 1 round/cycle about 3.5k LUT, two
+ntt4 engines about 2 x 2.5k, PMAC arithmetic about 3.6k, LUTRAM about 5.0k
+(I/O buffer, A matrix, FIFO, stores, buffers, noise memories), compress /
+decompress / CBD about 1.4k. These are fixed by the current throughput (one
+Keccak round, 8 butterflies, 2 basemul lanes, 8 rejection candidates per
+cycle) and storage; the rest is data movement between them. Below about 28k
+LUT a unit has to be narrowed or shared, which costs cycles.
