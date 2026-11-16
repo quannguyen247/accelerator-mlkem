@@ -12,7 +12,7 @@ TB := testbench/tb_mlkem_core.sv
 INC := rtl/utils
 RTL := $(wildcard rtl/modules/*/*.v rtl/modules/*/*/*.v)
 
-.PHONY: vectors test test-axi perf trace sim-iverilog lint project package impl clean
+.PHONY: vectors test test-axi test-axis perf trace sim-iverilog lint project package impl impl-ooc clean
 
 vectors:
 	$(PYTHON) $(VEC)/mlkem_gen.py $(N)
@@ -54,6 +54,17 @@ test-axi: vectors
 		-do "run -all; quit -f" | tee sim_axi.log
 	grep -Fq '*** ALL TESTS PASSED ***' $(BUILD)/sim_axi.log
 
+# Stream variant top (mlkem_axis_top): AXI4-Lite registers, AXI4-Stream
+# request and result, random VALID/READY stalls
+test-axis: vectors
+	mkdir -p $(BUILD)
+	cd $(BUILD) && vlib work > /dev/null && \
+	vlog -quiet -sv $(addprefix +incdir+../,$(INC)) $(addprefix ../,$(RTL)) \
+		../testbench/tb_mlkem_axis.sv && \
+	vsim -c -quiet tb_mlkem_axis +VEC=../$(VEC) +STALL=$(STALL) +SEED=$(SEED) \
+		-do "run -all; quit -f" | tee sim_axis.log
+	grep -Fq '*** ALL TESTS PASSED ***' $(BUILD)/sim_axis.log
+
 sim-iverilog: vectors
 	mkdir -p $(BUILD)
 	iverilog -g2012 -o $(BUILD)/tb.vvp $(addprefix -I,$(INC)) $(RTL) $(TB)
@@ -80,6 +91,15 @@ package:
 impl:
 	mkdir -p $(BUILD)/impl
 	$(VIVADO) -mode batch -nojournal -log $(BUILD)/impl/impl.log -source scripts/run_project.tcl
+
+# Out-of-context synthesis and implementation without the project, reports
+# in build/impl_ooc_<top> (TOP=mlkem_axis_top: Lite + Stream; mlkem_axi:
+# Lite + AXI4 buffer)
+TOP ?= mlkem_axis_top
+impl-ooc:
+	mkdir -p $(BUILD)/impl_ooc_$(TOP)
+	$(VIVADO) -mode batch -nojournal -log $(BUILD)/impl_ooc_$(TOP)/vivado.log \
+		-source scripts/impl_ooc.tcl -tclargs $(TOP) $(BUILD)/impl_ooc_$(TOP)
 
 clean:
 	rm -rf $(BUILD)
