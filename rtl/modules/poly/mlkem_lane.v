@@ -183,6 +183,9 @@ module mlkem_lane (
     reg ext_we;
     reg [5:0] ext_waddr;
     wire [47:0] ext_dout;
+    // l2_val is also the core's write data: zero outside LOAD (the unload
+    // writes zeros behind the read, the scrub zeroes the core).
+    reg [47:0] l2_val;
     wire core_busy_unused;
     wire core_done;
 
@@ -236,9 +239,6 @@ module mlkem_lane (
 
     reg la_v, l0_v, l1_v, l2_v;
     reg [47:0] l1_raw;
-    // l2_val is also the core's write data: zero outside LOAD (the unload
-    // writes zeros behind the read, the scrub zeroes the core).
-    reg [47:0] l2_val;
 
     // CBD noise, PMAC result from the buffer, or Decaps u' decompressed from
     // the C store (du = 10 or 11). The source selects of the stage 1 and 2
@@ -312,7 +312,13 @@ module mlkem_lane (
     end
 
     // FSM transition conditions
-    wire ld_done = n[6] && !la_v && !l0_v && !l1_v && !l2_v && !ext_we;
+    // The load ends one cycle after its last core write (ext_we_d), as when
+    // the write data had its own register: an earlier end reorders the
+    // dispatch and costs Encaps-1024 four cycles.
+    reg ext_we_d;
+    always @(posedge clk)
+        ext_we_d <= ext_we;
+    wire ld_done = n[6] && !la_v && !l0_v && !l1_v && !l2_v && !ext_we && !ext_we_d;
     // C store slot complete, registered (fills only grow during a job)
     reg c_full_q;
     always @(posedge clk)

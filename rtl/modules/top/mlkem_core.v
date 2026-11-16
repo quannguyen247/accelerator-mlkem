@@ -151,9 +151,18 @@ module mlkem_core (
         is_enc <= (op_r == `MLKEM_OP_ENCAPS);
         is_dec <= (op_r == `MLKEM_OP_DECAPS);
     end
-    // The output engine reads the vector lane buffers (KeyGen s^ segment;
-    // its segment fields are registers, the S store of the segment table)
-    wire out_s_sel = is_kg && (out_rd_dest == 2'd0);
+    // The output engine reads the vector lane buffers from the KeyGen s^
+    // segment (its segment fields are registers, the S store of the segment
+    // table) to the end of the request: the PMAC has written every t^ row by
+    // then, and the last s^ block may still wait in stage A after the segment
+    // has moved on.
+    reg out_s_seen;
+    always @(posedge clk)
+        if (go)
+            out_s_seen <= 1'b0;
+        else if (is_kg && (out_rd_dest == 2'd0))
+            out_s_seen <= 1'b1;
+    wire out_s_sel = is_kg && ((out_rd_dest == 2'd0) || out_s_seen);
     // sc counts 0..32 in WAIT only (it is 32 in every other state), so its
     // top bit alone tells whether the stores are being cleared.
     wire scrub_mem = !sc[5];
@@ -188,7 +197,7 @@ module mlkem_core (
             wire s_ep_unused;
             mlkem_slot_state u_s_st (
                 .clk(clk), .rst_n(rst_n), .clr(go),
-                .first(st_first),
+                .first(s_in && st_first),
                 .first_ep(1'b0),
                 .inc(s_in),
                 .fill(s_fill[g]), .ep(s_ep_unused));
