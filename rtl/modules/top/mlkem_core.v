@@ -210,7 +210,7 @@ module mlkem_core (
             wire t_ep_unused;
             // One read port: the output engine reads T only in KeyGen (the
             // PMAC writes it then), the PMAC only in Encaps / Decaps.
-            mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_t (
+            mlkem_poly_ram #(.W(12), .AW(5), .RREG(2)) u_t (
                 .clk(clk), .we({8{t_in || t_pm}}), .waddr({8{t_pm ? pm_wr_blk : st_blk}}),
                 .wdata(t_pm ? t_pm_data : st_data),
                 .ra_en(is_kg ? out_rd_en : 1'b1), .raddr(is_kg ? out_rd_blk : pm_t_blk),

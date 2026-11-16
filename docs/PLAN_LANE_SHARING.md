@@ -272,3 +272,19 @@ decompress / CBD about 1.4k. These are fixed by the current throughput (one
 Keccak round, 8 butterflies, 2 basemul lanes, 8 rejection candidates per
 cycle) and storage; the rest is data movement between them. Below about 28k
 LUT a unit has to be narrowed or shared, which costs cycles.
+
+## Step 7: timing margin at 4 ns (Lite + Stream top, OOC, cycles unchanged)
+
+| Build | LUT | FF | Slices | WNS | WHS | Power (vectorless) |
+|-------|-----|----|--------|-----|-----|--------------------|
+| 96a1048 core | 28,799 | 20,121 | 9,065 | +0.094 ns | +0.054 ns | 1.84 W |
+| step 6 core | 27,500 | 19,316 | 8,503 | -0.027 ns | +0.062 ns | 2.01 W |
+| step 7 core | 27,199 | 19,274 | 8,578 | +0.097 ns | +0.050 ns | 1.90 W |
+
+- NTT multiplier: the R = 2^16 Montgomery reduction is two 8-bit steps
+  (q = 1 mod 256: (t >> 8) + q - 13 t[7:0], a byte table plus one add per
+  stage, equal for every t <= (q - 1)^2); same six stages, -51 LUT and -24 FF
+  per multiplier, the reduction is no longer near critical.
+- T store: one read address register per bank (fanout 12 instead of 96).
+- cap: one load strobe per 64-bit lane; CBD prefetch register enabled
+  without the availability compare (nxt_v qualifies it).

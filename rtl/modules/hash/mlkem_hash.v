@@ -265,12 +265,15 @@ module mlkem_hash (
     reg [63:0] word_reg;
     // Result loads, registered with the squeeze handshake (the block is
     // taken the next cycle): each wide register is enabled by one flip-flop.
-    reg ld_pseed, ld_cap;
+    reg ld_pseed;
+    // ld_cap / ld_cap2, one copy per 64-bit lane of cap (each enables only
+    // its lane: the strobe would otherwise drive 1344 enables)
+    (* keep = "true" *) reg [10:0] ld_cap;
+    (* keep = "true" *) reg [20:11] ld_cap2;
     // cap takes lanes 0..10 with ld_cap and lanes 11..20 one cycle later
     // (ld_cap2): the state holds the block until the end of that cycle (the
     // first round or the idle clear), the noise writer reads word 0 first
     // and the sampler starts two cycles later.
-    reg ld_cap2;
     reg wr_rho_q, wr_h_q;
     reg scr_q;                      // scrub of the wide registers, one cycle later
     wire absorb_ready;
@@ -423,8 +426,8 @@ module mlkem_hash (
             pad_st <= 1'b0;
             sblk_ld <= 1'b0;
             ld_pseed <= 1'b0;
-            ld_cap <= 1'b0;
-            ld_cap2 <= 1'b0;
+            ld_cap <= 11'd0;
+            ld_cap2 <= 10'd0;
             wr_rho_q <= 1'b0;
             wr_h_q <= 1'b0;
         end else begin
@@ -438,8 +441,8 @@ module mlkem_hash (
             pad_st <= got_word && (rem == 9'd1);
             sblk_ld <= (curr_state == ST_NEXT) && job_go && !f_long;
             ld_pseed <= sq_fire && f_g;
-            ld_cap <= sq_fire && (f_prf || f_xof);
-            ld_cap2 <= ld_cap;
+            ld_cap <= {11{sq_fire && (f_prf || f_xof)}};
+            ld_cap2 <= {10{ld_cap[0]}};
             // rho: KeyGen G output, Decaps K-bar (rho was absorbed by the
             // XOF jobs, which precede J). h: H(ek) of KeyGen / Encaps, K of
             // Encaps / Decaps (h was absorbed by this G).
@@ -480,14 +483,14 @@ module mlkem_hash (
         end
     end
 
+    integer cl;
     always @(posedge clk) begin
         if (scr_q) begin
             cap <= 1344'd0;
         end else begin
-            if (ld_cap)
-                cap[703:0] <= squeeze_out[703:0];
-            if (ld_cap2)
-                cap[1343:704] <= squeeze_out[1343:704];
+            for (cl = 0; cl < 21; cl = cl + 1)
+                if ((cl < 11) ? ld_cap[cl] : ld_cap2[cl])
+                    cap[64*cl +: 64] <= squeeze_out[64*cl +: 64];
         end
     end
 

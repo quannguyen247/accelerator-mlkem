@@ -8,6 +8,8 @@
 //             rdata is the block at that address: a one-cycle read whose
 //             address comes from a register beside the memory, not from the
 //             reader's logic.
+//   RREG = 2  as 1, with one address register per bank (each drives only its
+//             bank, for a store whose reader is far away).
 module mlkem_poly_ram #(
     parameter W = 12,
     parameter AW = 5,
@@ -23,8 +25,19 @@ module mlkem_poly_ram #(
 );
 
     wire [AW-1:0] ra;
+    wire [8*AW-1:0] ra_b;               // address of each bank
     generate
-        if (RREG) begin : g_ra
+        if (RREG == 2) begin : g_rab
+            genvar rb;
+            for (rb = 0; rb < 8; rb = rb + 1) begin : g_b
+                (* keep = "true" *) reg [AW-1:0] ra_q;
+                always @(posedge clk)
+                    if (ra_en)
+                        ra_q <= raddr;
+                assign ra_b[rb*AW +: AW] = ra_q;
+            end
+            assign ra = ra_b[AW-1:0];
+        end else if (RREG) begin : g_ra
             // kept: memories read at the same address must not share it
             (* keep = "true" *) reg [AW-1:0] ra_q;
             always @(posedge clk)
@@ -33,6 +46,9 @@ module mlkem_poly_ram #(
             assign ra = ra_q;
         end else begin : g_ra_none
             assign ra = raddr;
+        end
+        if (RREG != 2) begin : g_ra_all
+            assign ra_b = {8{ra}};
         end
     endgenerate
 
@@ -44,7 +60,7 @@ module mlkem_poly_ram #(
                 if (we[b])
                     mem[waddr[b*AW +: AW]] <= wdata[b*W +: W];
             end
-            assign rdata[b*W +: W] = mem[ra];
+            assign rdata[b*W +: W] = mem[ra_b[b*AW +: AW]];
         end
     endgenerate
 

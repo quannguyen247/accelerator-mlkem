@@ -24,22 +24,15 @@
     wire [23:0] t_comb;
     reg [23:0] t_reg;
 
-    wire [15:0] t_16;
-    wire [15:0] p1_m;
-    wire [15:0] p2_m;
-    wire [15:0] m_comb;
-    reg [15:0] m_reg;
-    reg [23:0] t_reg_d1;
-
-    wire [28:0] m_29;
-    wire [28:0] p1_mq;
-    wire [28:0] p2_mq;
-    wire [28:0] mq_comb;
-    wire [28:0] t_plus_comb;
-    reg [28:0] t_plus_reg;
-
-    wire [12:0] u_comb;
-    wire [13:0] sub_val;
+    // Stages 4 and 5: two 8-bit Montgomery steps (together the 16-bit
+    // reduction, t * 2^-16 mod q). As q = 1 mod 256, a step is
+    //   (t + m q) / 256 with m = 256 - t[7:0]  =  (t >> 8) + q - 13 t[7:0],
+    // a table of the low byte plus one two-input add (no wide multi-operand
+    // adder). t1 < 2^16, t2 < 3512 < 2q; the result equals the R = 2^16
+    // reduction for every t <= (q - 1)^2 (checked exhaustively).
+    reg [15:0] t1_reg;
+    reg [11:0] t2_reg;
+    wire [12:0] sub_val;
     wire [11:0] reduced_comb;
 
     // Partial product digit * b for digit = 0..3
@@ -58,8 +51,8 @@
     endfunction
 
     // Registered operands break the INTT subtract -> multiply path.
-    // Six-cycle latency: operands, partial sums, product, m, t+m*q,
-    // canonical result.
+    // Six-cycle latency: operands, partial sums, product, two Montgomery
+    // steps, canonical result.
     always @(posedge clk) begin
         a_reg <= a_i;
         b_reg <= b_i;
@@ -88,29 +81,21 @@
         t_reg <= t_comb;
     end
 
-    assign t_16 = t_reg[15:0];
-    assign p1_m = (t_16 << 12) - (t_16 << 9); // t × 4096 - t × 512 = t × 3584
-    assign p2_m = (t_16 << 8)  + t_16;        // t × 256  + t × 1   = t × 257
-    assign m_comb = p1_m - p2_m;              // t × 3584 - t × 257 = t × 3327
-
-    always @(posedge clk) begin
-        m_reg <= m_comb;
-        t_reg_d1 <= t_reg;
+    // q - 13 x for a byte x (14 .. 3329), a table in LUTs
+    (* rom_style = "distributed" *) reg [11:0] kq [0:255];
+    integer ki;
+    initial begin
+        for (ki = 0; ki < 256; ki = ki + 1)
+            kq[ki] = 12'd3329 - 13 * ki;
     end
 
-    assign m_29 = {13'd0, m_reg};
-    assign p1_mq = (m_29 << 12) - (m_29 << 9); // m × 4096 - m × 512 = m × 3584
-    assign p2_mq = (m_29 << 8)  - m_29;        // m × 256  - m × 1   = m × 255
-    assign mq_comb = p1_mq - p2_mq;            // m × 3584 - m × 255 = m × 3329
-    assign t_plus_comb = {5'd0, t_reg_d1} + mq_comb;
-
     always @(posedge clk) begin
-        t_plus_reg <= t_plus_comb;
+        t1_reg <= t_reg[23:8] + {4'd0, kq[t_reg[7:0]]};
+        t2_reg <= {4'd0, t1_reg[15:8]} + kq[t1_reg[7:0]];
     end
 
-    assign u_comb = t_plus_reg[28:16];
-    assign sub_val = {1'b0, u_comb} - 14'd3329;
-    assign reduced_comb = sub_val[13] ? u_comb[11:0] : sub_val[11:0];
+    assign sub_val = {1'b0, t2_reg} - 13'd3329;
+    assign reduced_comb = sub_val[12] ? t2_reg : sub_val[11:0];
 
     always @(posedge clk) begin
         r_o <= reduced_comb;

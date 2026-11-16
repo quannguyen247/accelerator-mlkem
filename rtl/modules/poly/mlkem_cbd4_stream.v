@@ -66,10 +66,13 @@ module mlkem_cbd4_stream (
     assign rd_addr = wptr;
     // Prefetch: the next word is read once written, into an empty register or
     // as the current one is used. The data register has no reset (nxt_v
-    // qualifies it), so init does not reach its enable.
-    wire fetch = (!nxt_v || (take && refill)) && (wptr < avail);
+    // qualifies it), so init does not reach its enable; it also loads while
+    // its word is not written yet (nxt_v stays low, the fetch reloads it), so
+    // the availability compare does not reach its enable either.
+    wire nxt_free = !nxt_v || (take && refill);
+    wire fetch = nxt_free && (wptr < avail);
     always @(posedge clk)
-        if (fetch)
+        if (nxt_free)
             nxt <= rd_data;
 
     always @(posedge clk) begin
