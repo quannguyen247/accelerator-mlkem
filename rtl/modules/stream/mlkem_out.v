@@ -26,12 +26,15 @@ module mlkem_out (
     output reg [2:0] rd_slot,      // slot of the block being issued
     output wire rd_en,
     output wire [4:0] rd_blk,
-    output reg [2:0] rd_dslot,     // slot of the block in stage A
+    output reg [2:0] rd_dslot,     // slot of the block in stage A (S store)
+    output reg [2:0] rd_dslot_t,   // ... T store, row / scalar lane buffer
+    output reg [2:0] rd_dslot_b,   // (each taken only by blocks of that source)
     input wire [95:0] rd_s_data,
     input wire [95:0] rd_t_data,
-    input wire [87:0] rd_c_data,
     input wire [5:0] rd_fill,      // fill of slot rd_slot of the store rd_dest
-    input wire [95:0] bias_data,   // KeyGen e^[rd_dslot] block, added to the T store value
+    // Lane buffer 4 + rd_dslot_b: KeyGen e^ block (added to the T store
+    // value) or Encaps ciphertext block (11-bit values in 12-bit fields)
+    input wire [95:0] bias_data,
     input wire [5:0] bias_fill,    // fill and epoch of e^[rd_slot]
     input wire bias_ep,
 
@@ -41,7 +44,9 @@ module mlkem_out (
     input wire [255:0] h,
     input wire h_v,
     input wire [255:0] z,
-    input wire [255:0] key,
+    // The shared secret is held in the input engine's h register (Encaps K,
+    // Decaps K') or, for an implicit rejection, in its rho register (K-bar).
+    input wire key_rho,
     input wire key_v,
 
     // Hashed ek copy to the tap FIFO (KeyGen). The copy (at most 196 words,
@@ -168,14 +173,15 @@ module mlkem_out (
             default: reg_ok = key_v_q;
         endcase
     end
-    // Register value of the word in stage A (the values do not change once valid)
+    // Register value of the word in stage A (the values do not change once
+    // valid). a_sreg names the register holding it: 0 rho, 1 h, 2 z (the key
+    // segment is mapped to rho or h when it enters stage A).
     reg [255:0] reg_val;
     always @(*) begin
         case (a_sreg)
             2'd0: reg_val = rho;
             2'd1: reg_val = h;
-            2'd2: reg_val = z;
-            default: reg_val = key;
+            default: reg_val = z;
         endcase
     end
 
@@ -210,8 +216,7 @@ module mlkem_out (
     reg [1:0] r0_dest;
     reg [95:0] r0_s;
     reg [95:0] r0_t;
-    reg [87:0] r0_c;
-    reg [95:0] r0_add;
+    reg [95:0] r0_add;              // lane buffer block: e^ or ciphertext
     reg [63:0] r0_word;
 
     reg r1_v;
@@ -240,7 +245,7 @@ module mlkem_out (
             default: begin
                 r0_data = 96'd0;
                 for (i = 0; i < 8; i = i + 1)
-                    r0_data[12*i +: 11] = r0_c[11*i +: 11];
+                    r0_data[12*i +: 11] = r0_add[12*i +: 11];
             end
         endcase
     end
@@ -282,9 +287,8 @@ module mlkem_out (
             a_bias <= use_bias;
             a_sd <= sd;
             a_dest <= sdest;
-            a_sreg <= sreg;
+            a_sreg <= (sreg == 2'd3) ? {1'b0, !key_rho} : sreg;
             a_wsel <= bcnt[1:0];
-            rd_dslot <= rd_slot;
             r0_reg <= a_reg;
             r0_bias <= a_bias;
             r0_sd <= a_sd;
@@ -297,6 +301,14 @@ module mlkem_out (
             r2_sd <= r1_sd;
             r2_data <= r1_sum;
         end
+        // Slot of the block in stage A, per source (the R0 source
+        // registers below take the block of their own source only)
+        if (adv && (sk != SK_REG) && (sdest == 2'd0))
+            rd_dslot <= rd_slot;
+        if (adv && (sk != SK_REG) && (sdest == 2'd1))
+            rd_dslot_t <= rd_slot;
+        if (adv && (((sk != SK_REG) && sdest[1]) || use_bias))
+            rd_dslot_b <= rd_slot;
         // Source registers of R0 (and the R1 bias): each takes only the
         // blocks that use it (the flags travel with the block), so adv
         // enables the shared stages only.
@@ -304,9 +316,7 @@ module mlkem_out (
             r0_s <= rd_s_data;
         if (adv && !a_reg && (a_dest == 2'd1))
             r0_t <= rd_t_data;
-        if (adv && !a_reg && a_dest[1])
-            r0_c <= rd_c_data;
-        if (adv && a_bias)
+        if (adv && (a_bias || (!a_reg && a_dest[1])))
             r0_add <= bias_data;
         if (adv && a_reg)
             r0_word <= reg_val[{a_wsel, 6'd0} +: 64];

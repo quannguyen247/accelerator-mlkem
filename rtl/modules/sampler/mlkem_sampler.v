@@ -17,6 +17,14 @@ module mlkem_sampler (
     output wire busy,
     output reg [8:0] count,
 
+    // PRF block read for the hash's noise writer (sampler idle): nz_start
+    // (the cycle before the first word) restarts the chunk counter, which
+    // then steps two chunks per three 64-bit words while nz_run; chunk_data
+    // is the stage A chunk register.
+    input wire nz_start,
+    input wire nz_run,
+    output wire [95:0] chunk_data,
+
     input wire [2:0] rde_slot,
     input wire [2:0] rdo_slot,
     input wire [4:0] rd_blk,
@@ -60,7 +68,10 @@ module mlkem_sampler (
 
     assign busy = scan || va || vb || vr || vc || vd;
 
-    // Stage A: 12-byte chunk
+    // Stage A: 12-byte chunk. Noise words: chunks 0, 1, 2, 2, 3, 4, 4, ...
+    // (word 3m is chunk 2m, word 3m + 1 takes chunk 2m + 1, word 3m + 2 is
+    // the rest of chunk 2m + 1, held by the hash).
+    reg [1:0] nq;
     always @(posedge clk) begin
         if (!rst_n || kill) begin
             scan <= 1'b0;
@@ -75,10 +86,16 @@ module mlkem_sampler (
                 chunk <= chunk + 4'd1;
                 if (chunk == 4'd13)
                     scan <= 1'b0;
+            end else if (nz_start) begin
+                chunk <= 4'd0;
+            end else if (nz_run && nq != 2'd2) begin
+                chunk <= chunk + 4'd1;
             end
         end
+        nq <= (nz_start || nq == 2'd2) ? 2'd0 : nq + 2'd1;
         ch_a <= cap[chunk*96 +: 96];
     end
+    assign chunk_data = ch_a;
 
     // Stage B: candidates and acceptance
     integer i, c;

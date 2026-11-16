@@ -46,14 +46,14 @@ module mlkem_hash (
     output wire [255:0] rho,
     output wire rho_v,
     output wire [255:0] h,
-    // rho / h are held in the input engine's registers: write strobes
+    // rho / h are held in the input engine's registers: write strobes. They
+    // also hold the shared secrets once their own values are absorbed: K
+    // (G of Encaps / Decaps) goes to h, K-bar (J of Decaps) to rho.
     output wire wr_rho,
     output wire wr_h,
     output wire [255:0] wr_val,
     output reg h_v,
-    output reg [255:0] kk,
     output reg kk_v,
-    output reg [255:0] kbar,
     output reg kbar_v,
     output reg hfail,
 
@@ -61,7 +61,7 @@ module mlkem_hash (
     output reg nz_we,
     output reg [3:0] nz_lane,
     output reg [4:0] nz_addr,
-    output reg [63:0] nz_wdata,
+    output wire [63:0] nz_wdata,
 
     // XOF blocks to the sampler
     output reg smp_load,
@@ -69,7 +69,12 @@ module mlkem_hash (
     output reg [3:0] smp_slot,
     output reg [1343:0] cap,
     input wire smp_busy,
-    input wire [8:0] smp_count
+    input wire [8:0] smp_count,
+    // PRF words are read through the sampler's chunk register (96 bits per
+    // cycle, two chunks per three words): start / run of its chunk counter
+    output wire smp_nz_start,
+    output wire smp_nz_run,
+    input wire [95:0] smp_chunk
 );
 
     `include "mlkem_funcs.vh"
@@ -260,7 +265,7 @@ module mlkem_hash (
     reg [63:0] word_reg;
     // Result loads, registered with the squeeze handshake (the block is
     // taken the next cycle): each wide register is enabled by one flip-flop.
-    reg ld_kk, ld_kbar, ld_pseed, ld_cap;
+    reg ld_pseed, ld_cap;
     // cap takes lanes 0..10 with ld_cap and lanes 11..20 one cycle later
     // (ld_cap2): the state holds the block until the end of that cycle (the
     // first round or the idle clear), the noise writer reads word 0 first
@@ -385,6 +390,25 @@ module mlkem_hash (
     reg [4:0] nw_left;
     reg [4:0] nw_base;
     reg [3:0] nw_lane;
+    // Word of the block mod 3 (nw_p while issued, nz_ph with the write
+    // strobe) and the chunk bits not yet sent: word 3m is chunk 2m [63:0],
+    // word 3m + 1 is {chunk 2m + 1 [31:0], chunk 2m [95:64]}, word 3m + 2 is
+    // chunk 2m + 1 [95:32].
+    reg [1:0] nw_p, nz_ph;
+    reg [63:0] nz_keep;
+    assign smp_nz_start = sq_cap && f_prf;
+    assign smp_nz_run = nw_busy;
+    assign nz_wdata[31:0] = (nz_ph == 2'd0) ? smp_chunk[31:0] : nz_keep[31:0];
+    assign nz_wdata[63:32] = (nz_ph == 2'd0) ? smp_chunk[63:32] :
+                             (nz_ph == 2'd1) ? smp_chunk[31:0] : nz_keep[63:32];
+    always @(posedge clk) begin
+        if (scr_q) begin
+            nz_keep <= 64'd0;
+        end else begin
+            nz_keep[63:32] <= smp_chunk[95:64];
+            nz_keep[31:0] <= (nz_ph == 2'd0) ? smp_chunk[95:64] : smp_chunk[63:32];
+        end
+    end
 
     // Hash FSM next state
     wire absorb_fire = absorb_valid && absorb_ready;
@@ -398,8 +422,6 @@ module mlkem_hash (
             pad_lj <= 17'd0;
             pad_st <= 1'b0;
             sblk_ld <= 1'b0;
-            ld_kk <= 1'b0;
-            ld_kbar <= 1'b0;
             ld_pseed <= 1'b0;
             ld_cap <= 1'b0;
             ld_cap2 <= 1'b0;
@@ -415,13 +437,14 @@ module mlkem_hash (
             end
             pad_st <= got_word && (rem == 9'd1);
             sblk_ld <= (curr_state == ST_NEXT) && job_go && !f_long;
-            ld_kk <= sq_fire && f_g && !op_kg;
-            ld_kbar <= sq_fire && f_j;
             ld_pseed <= sq_fire && f_g;
             ld_cap <= sq_fire && (f_prf || f_xof);
             ld_cap2 <= ld_cap;
-            wr_rho_q <= sq_fire && f_g && op_kg;
-            wr_h_q <= sq_fire && f_h && (op != `MLKEM_OP_DECAPS);
+            // rho: KeyGen G output, Decaps K-bar (rho was absorbed by the
+            // XOF jobs, which precede J). h: H(ek) of KeyGen / Encaps, K of
+            // Encaps / Decaps (h was absorbed by this G).
+            wr_rho_q <= sq_fire && ((f_g && op_kg) || f_j);
+            wr_h_q <= sq_fire && ((f_h && (op != `MLKEM_OP_DECAPS)) || (f_g && !op_kg));
         end
     end
 
@@ -471,16 +494,10 @@ module mlkem_hash (
     always @(posedge clk) begin
         if (scr_q) begin
             pseed <= 256'd0;
-            kk <= 256'd0;
-            kbar <= 256'd0;
             word_reg <= 64'd0;
         end else begin
             if (ld_pseed)
                 pseed <= squeeze_out[511:256];
-            if (ld_kk)
-                kk <= squeeze_out[255:0];
-            if (ld_kbar)
-                kbar <= squeeze_out[255:0];
             word_reg <= word_in;
         end
     end
@@ -577,6 +594,7 @@ module mlkem_hash (
                     J_PRF: begin
                         nw_busy <= 1'b1;
                         nw_cnt <= 5'd0;
+                        nw_p <= 2'd0;
                         nw_lane <= prf_lane;
                         nw_base <= (sq_blk == 2'd1) ? 5'd0 : 5'd17;
                         nw_left <= !eta3 ? 5'd16 : (sq_blk == 2'd1) ? 5'd17 : 5'd7;
@@ -590,12 +608,14 @@ module mlkem_hash (
             end
 
 
-            // Noise writer: one 64-bit PRF word per cycle into the lane memory.
+            // Noise writer: one 64-bit PRF word per cycle into the lane memory
+            // (the word itself is formed from the sampler's chunk register).
             if (nw_busy) begin
                 nz_we <= 1'b1;
                 nz_lane <= nw_lane;
                 nz_addr <= nw_base + nw_cnt;
-                nz_wdata <= cap[{nw_cnt, 6'd0} +: 64];
+                nz_ph <= nw_p;
+                nw_p <= (nw_p == 2'd2) ? 2'd0 : nw_p + 2'd1;
                 nw_cnt <= nw_cnt + 5'd1;
                 if (nw_cnt + 5'd1 == nw_left)
                     nw_busy <= 1'b0;
@@ -713,7 +733,6 @@ module mlkem_hash (
             endcase
 
             if (scrub) begin
-                nz_wdata <= 64'd0;
                 kk_v <= 1'b0;
                 kbar_v <= 1'b0;
             end

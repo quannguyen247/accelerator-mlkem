@@ -5,11 +5,16 @@
 // with fill state. The NTT engines (mlkem_lane) are shared; whichever engine
 // runs a job of this lane reads the noise and the buffer through the engine
 // port and writes its unload results here.
-//   LANE 0..3  vector: buffer read by the PMAC (V operand), written by the engine
+//   LANE 0..3  vector: buffer read by the PMAC (V operand) and by the output
+//                      engine (KeyGen s^), written by the engine
 //   LANE 4..7  row:    buffer written by the PMAC (Encaps) or the engine (KeyGen
-//                      e^), read by the engine and by the output engine (bias)
-//   LANE 8     scalar: buffer written by the PMAC, read by the engine
-// scrub clears the noise memory and the buffer (32 cycles, busy meanwhile).
+//                      e^, Encaps u ciphertext), read by the engine and by the
+//                      output engine (KeyGen bias, Encaps ciphertext)
+//   LANE 8     scalar: buffer written by the PMAC or the engine (Encaps v
+//                      ciphertext), read by the engine and by the output engine
+// scrub clears the noise memory and the buffer (32 cycles, busy meanwhile);
+// keep_buf leaves the buffer (an Encaps row / scalar buffer then holds only
+// ciphertext, which the output engine may still be reading).
 // Buffer reads take one cycle: the read address is registered in the buffer
 // (the output engine's address only while pm_ra_en, see mlkem_out).
 module mlkem_lane_ctx #(
@@ -20,7 +25,8 @@ module mlkem_lane_ctx #(
     input wire kill,
     input wire go,
     input wire scrub,
-    input wire out_rd,                   // KeyGen: the output engine reads the row buffer
+    input wire out_rd,                   // the output engine reads the buffer
+    input wire keep_buf,                 // scrub the noise memory only
     output wire busy,
 
     // PRF noise words from the hash engine
@@ -115,7 +121,7 @@ module mlkem_lane_ctx #(
         b_we = 8'd0;
         b_waddr = pm_wr_blk;
         b_wdata = pm_wr_data;
-        if (scrubbing) begin
+        if (scrubbing && !keep_buf) begin
             b_we = 8'hFF;
             b_waddr = sc;
             b_wdata = 96'd0;
@@ -126,6 +132,10 @@ module mlkem_lane_ctx #(
             b_waddr = e_widx[5:1];
             b_wdata = {2{e_wdata}};
         end
+        // A vector buffer has the engine as its only writer, whose data is
+        // zero outside its unload groups (also during the scrub, engines idle)
+        if (IS_VEC)
+            b_wdata = {2{e_wdata}};
     end
 
     generate
@@ -138,24 +148,27 @@ module mlkem_lane_ctx #(
                 .rdata(e_rdata));
             assign pm_rd_data = e_rdata;
         end else if (IS_VEC) begin : g_vec
-            // Read only by the PMAC
+            // Read by the PMAC, and by the output engine (KeyGen s^, out_rd;
+            // the core selects pm_rd_blk)
             mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_buf (
                 .clk(clk), .we(b_we), .waddr({8{b_waddr}}), .wdata(b_wdata),
-                .ra_en(1'b1), .raddr(pm_rd_blk), .rdata(pm_rd_data));
+                .ra_en(out_rd ? pm_ra_en : 1'b1), .raddr(pm_rd_blk), .rdata(pm_rd_data));
             assign e_rdata = 96'd0;
         end else begin : g_scl
-            // Read only by the engine
+            // One read port: the engine, or the output engine (Encaps v
+            // ciphertext, out_rd)
             mlkem_poly_ram #(.W(12), .AW(5), .RREG(1)) u_buf (
                 .clk(clk), .we(b_we), .waddr({8{b_waddr}}), .wdata(b_wdata),
-                .ra_en(1'b1), .raddr(e_rblk), .rdata(e_rdata));
-            assign pm_rd_data = 96'd0;
+                .ra_en(out_rd ? pm_ra_en : 1'b1), .raddr(out_rd ? pm_rd_blk : e_rblk),
+                .rdata(e_rdata));
+            assign pm_rd_data = e_rdata;
         end
     endgenerate
 
     mlkem_slot_state u_bstate (
         .clk(clk),
         .rst_n(rst_n),
-        .clr(go || scrubbing || kill),
+        .clr(go || (scrubbing && !keep_buf) || kill),
         .first(pm_we ? pm_wr_first : (e_we && e_first)),
         .first_ep(pm_we ? pm_wr_ep : e_ep),
         .inc(pm_we || (e_we && e_last)),

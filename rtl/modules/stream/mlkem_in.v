@@ -17,7 +17,8 @@ module mlkem_in (
     input wire go,
     input wire scrub,
     // The rho / h / z registers are shared with the operations that do not
-    // receive them: the hash writes rho (KeyGen) and h (KeyGen, Encaps), the
+    // receive them: the hash writes rho (KeyGen; Decaps K-bar) and h (KeyGen,
+    // Encaps; K of Encaps and Decaps), the
     // seed port writes z (KeyGen, 32-bit words); z_clr clears z.
     input wire ext_rho_we,
     input wire ext_h_we,
@@ -217,6 +218,15 @@ module mlkem_in (
     always @(posedge clk)
         b_vals <= up_vals;
 
+    // Store block, taken with the store write strobes and zero in every other
+    // cycle (the S store's scrub writes it as is).
+    always @(posedge clk) begin
+        if (bv && !b_reg_seg)
+            st_data <= red;
+        else
+            st_data <= 96'd0;
+    end
+
     always @(posedge clk) begin
         {sk, sd, sdest, sslot0, sreg, stap, schk} <=
             {seg_d[17:16], seg_d[15:12], seg_d[11:10], seg_d[6:4], seg_d[3:2], seg_d[1], seg_d[0]};
@@ -293,7 +303,6 @@ module mlkem_in (
                     end
                     st_blk <= b_blk;
                     st_first <= (b_blk == 5'd0);
-                    st_data <= red;
                     key_bad <= b_chk && bad;
                 end else begin
                     if (b_blk[1:0] == 2'd3) begin
@@ -322,6 +331,11 @@ module mlkem_in (
             if (scrub || z_clr) begin
                 z <= 256'd0;
                 z_v <= 1'b0;
+            end
+            // rho and h end the request holding the shared secrets
+            if (scrub) begin
+                rho <= 256'd0;
+                h <= 256'd0;
             end
 
             if (go) begin

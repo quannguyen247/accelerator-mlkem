@@ -13,7 +13,7 @@
 // memory and buffer live in mlkem_lane_ctx; the core routes the context and
 // store ports by the latched lane (lid). Job kinds by logical lane:
 //   0..3  vector: forward NTT of s / y (CBD noise) or Decaps u' (C store),
-//                 result to the buffer (KeyGen: also S)
+//                 result to the buffer (KeyGen s^: read from there for dk)
 //   4..7  row:    INTT of a u row plus e1, compressed to C / compared
 //                 (KeyGen: forward NTT of e to the buffer)
 //   8     scalar: INTT of v plus e2 and the message, compressed to C /
@@ -56,30 +56,21 @@ module mlkem_lane (
     output wire b_last,
     output wire b_wep,
 
-    // S store write (KeyGen s^, slot lid): four coefficients of group s_idx
-    output reg s_we,
-    output reg [5:0] s_idx,
-    output reg [47:0] s_data,
-    output reg s_first,
-    output reg s_last,
-
-    // C store slot cslot: block read (c_rdata[87:0], eight 11-bit values at
-    // c_rblk, one cycle after the address) and group write. c_rdata[91:88] are the message bits of group
-    // mu_idx, valid one cycle after the index.
+    // C store slot cslot (Decaps ciphertext): block read (c_rdata[87:0],
+    // eight 11-bit values at c_rblk, one cycle after the address).
+    // c_rdata[91:88] are the message bits of group mu_idx, valid one cycle
+    // after the index. Encaps writes its compressed u / v groups to the
+    // lane's own buffer instead (epoch 1, 11-bit values in 12-bit fields).
     output wire c_rreq,
     output wire [4:0] c_rblk,
     input wire [91:0] c_rdata,
     input wire [5:0] c_fill,
-    output reg c_we,
-    output wire [5:0] c_widx,
-    output reg [43:0] c_wdata,
-    output wire c_first,
-    output wire c_last,
 
-    // Message group index, decoded message strobe (bits c_wdata[0], [11],
-    // [22], [33] of group c_widx), re-encryption mismatch (sticky per request)
+    // Message group index, decoded message strobe (mp_bits: the four bits
+    // of the unload group), re-encryption mismatch (sticky per request)
     output wire [5:0] mu_idx,
     output reg mp_we,
+    output reg [3:0] mp_bits,
     output reg diff
 );
 
@@ -115,12 +106,12 @@ module mlkem_lane (
 
     wire is_keygen = (op == `MLKEM_OP_KEYGEN);
     wire is_decaps = (op == `MLKEM_OP_DECAPS);
+    wire is_encaps = (op == `MLKEM_OP_ENCAPS);
 
     // Job descriptor, latched with the job:
     //   jd_ld / jd_ld_ep   load source and the buffer epoch it waits for
     //   jd_mode            0: NTT, 1: INTT
     //   jd_ul / jd_ul_ep   unload destination and the epoch it writes
-    //   jd_swr             copy the result to the S store (KeyGen s^)
     //   jd_cmp             compare with the received ciphertext (Decaps)
     //   ul_noise           add CBD noise while unloading
     //   ul_cread           read the C store while unloading
@@ -130,7 +121,6 @@ module mlkem_lane (
     reg jd_mode;
     reg [1:0] jd_ul;
     reg jd_ul_ep;
-    reg jd_swr;
     reg jd_cmp;
     reg ul_noise;
     reg ul_cread;
@@ -154,8 +144,7 @@ module mlkem_lane (
             jd_ul <= j_vec ? `MLKEM_UL_BUF :
                      j_row ? (is_keygen ? `MLKEM_UL_BUF : `MLKEM_UL_POSU) :
                      (j_posw ? `MLKEM_UL_POSW : `MLKEM_UL_POSV);
-            jd_ul_ep <= j_vec && is_decaps && jnum;
-            jd_swr <= j_vec && is_keygen;
+            jd_ul_ep <= (j_vec && is_decaps && jnum) || (!j_vec && is_encaps);
             jd_cmp <= !j_vec && is_decaps;
             ul_noise <= (j_row && !is_keygen) || (j_scl && !j_posw);
             ul_cread <= !j_vec && is_decaps;
@@ -193,7 +182,6 @@ module mlkem_lane (
     reg [5:0] na;                        // group issued one cycle ago
     reg ext_we;
     reg [5:0] ext_waddr;
-    reg [47:0] ext_din;
     wire [47:0] ext_dout;
     wire core_busy_unused;
     wire core_done;
@@ -208,7 +196,7 @@ module mlkem_lane (
         .mode(jd_mode),
         .ext_we(ext_we),
         .ext_waddr(ext_waddr),
-        .ext_din(ext_din),
+        .ext_din(l2_val),
         .ext_raddr(na),
         .ext_dout(ext_dout),
         .busy(core_busy_unused),
@@ -247,7 +235,10 @@ module mlkem_lane (
     wire ld_issue = st_load && !n[6] && ld_ready;
 
     reg la_v, l0_v, l1_v, l2_v;
-    reg [47:0] l1_raw, l2_val;
+    reg [47:0] l1_raw;
+    // l2_val is also the core's write data: zero outside LOAD (the unload
+    // writes zeros behind the read, the scrub zeroes the core).
+    reg [47:0] l2_val;
 
     // CBD noise, PMAC result from the buffer, or Decaps u' decompressed from
     // the C store (du = 10 or 11). The source selects of the stage 1 and 2
@@ -273,8 +264,11 @@ module mlkem_lane (
         end
         for (i = 0; i < 4; i = i + 1) begin
             l1_sum = mlkem_decompress_sum(l1_y3[i], l1_raw[12*i +: 11], l1_yr[i]);
-            l2_val[12*i +: 12] <= !ld_dec_d ? l1_raw[12*i +: 12] :
-                                  k4_reg ? l1_sum[22:11] : l1_sum[21:10];
+            if (!st_load)
+                l2_val[12*i +: 12] <= 12'd0;
+            else
+                l2_val[12*i +: 12] <= !ld_dec_d ? l1_raw[12*i +: 12] :
+                                      k4_reg ? l1_sum[22:11] : l1_sum[21:10];
         end
     end
 
@@ -298,7 +292,8 @@ module mlkem_lane (
     assign b_rblk = n[5:1];
     assign busy = !st_idle;
 
-    // Core write port: load stage 2, zeros behind the unload read, or the
+    // Core write port: load stage 2 (l2_val, so the strobe and the address
+    // are taken with it, from stage 1), zeros behind the unload read, or the
     // scrub counter.
     always @(posedge clk) begin
         if (!rst_n || kill)
@@ -306,13 +301,12 @@ module mlkem_lane (
         else if (st_scrub)
             ext_we <= zero_core;
         else if (st_load)
-            ext_we <= l2_v;
+            ext_we <= l1_v;
         else if (st_unload)
             ext_we <= ul_go;
         else
             ext_we <= 1'b0;
-        ext_waddr <= st_scrub ? sc[5:0] : st_unload ? n[5:0] : n2;
-        ext_din <= st_load ? l2_val : 48'd0;
+        ext_waddr <= st_scrub ? sc[5:0] : st_unload ? n[5:0] : n1;
         c_rreq_q <= (st_ldw && (jd_ld == `MLKEM_LD_DEC)) || (st_load && (jd_ld == `MLKEM_LD_DEC) && !n[6]) ||
                     (st_ulw && ul_cread) || (st_unload && ul_cread && !n[6]);
     end
@@ -435,47 +429,20 @@ module mlkem_lane (
         n7_last <= n6[0];
     end
     mlkem_delay #(.W(6), .D(4)) u_dn6 (.clk(clk), .d(n2), .q(n6));
-    assign c_widx = n7;
-    assign c_first = n7_first;
-    assign c_last = n7_last;
 
-    // Buffer and S store unload: the transformed values (the PMAC scales
-    // its sums), aligned with the post-processing pipeline below.
-    wire [47:0] x7;
+    // Buffer unload, aligned with the post-processing pipeline below: the
+    // transformed values (the PMAC scales its sums), or the Encaps
+    // ciphertext group (u / v compressed, ul_cw).
+    wire [47:0] x6;
     genvar gi;
-    mlkem_delay #(.W(48), .D(6)) u_dx7 (.clk(clk), .d(x1), .q(x7));
-
-    // v7 && (jd_ul == UL_BUF), registered (jd_ul is constant during a job)
-    reg ulb_q;
-    always @(posedge clk) begin
-        if (!rst_n || kill)
-            ulb_q <= 1'b0;
-        else
-            ulb_q <= v6 && (jd_ul == `MLKEM_UL_BUF);
-    end
-    assign b_we = ulb_q;
-    assign b_widx = n7;
-    assign b_wdata = x7;
-    assign b_first = n7_first;
-    assign b_last = n7_last;
-    assign b_wep = jd_ul_ep;
-
-    always @(posedge clk) begin
-        if (!rst_n || kill)
-            s_we <= 1'b0;
-        else
-            s_we <= ulb_q && jd_swr;
-        s_idx <= n7;
-        s_data <= x7;
-        s_first <= n7_first;
-        s_last <= n7_last;
-    end
+    mlkem_delay #(.W(48), .D(5)) u_dx6 (.clk(clk), .d(x1), .q(x6));
+    wire ul_cw = ul_noise && !jd_cmp;
 
     // Noise, compression and compare, per coefficient of the group:
     //   row     u = x + e1, compressed to du bits
     //   scalar  v = x + e2 + Decompress_1(mu), compressed to dv bits
     //           Decaps first job: w = Decompress_dv(c2) - x, compressed to 1 bit
-    // Encaps writes the result to the C store; Decaps compares it with the
+    // Encaps writes the result to the buffer; Decaps compares it with the
     // received ciphertext (cr), the first scalar job returns the message bits.
     reg [43:0] cr1;
     reg [47:0] e1, s2, s3;
@@ -519,6 +486,29 @@ module mlkem_lane (
         end
     endgenerate
 
+    // Buffer write: v7 && (jd_ul == UL_BUF || ul_cw), registered (the job
+    // fields are constant during a job). x7 is zero outside unload groups,
+    // so a vector buffer takes it without a select and its scrub (engines
+    // idle) writes zeros.
+    reg ulb_q;
+    reg [47:0] x7;
+    always @(posedge clk) begin
+        if (!rst_n || kill)
+            ulb_q <= 1'b0;
+        else
+            ulb_q <= v6 && ((jd_ul == `MLKEM_UL_BUF) || ul_cw);
+        if (!v6)
+            x7 <= 48'd0;
+        else
+            x7 <= ul_cw ? {1'b0, cq6[43:33], 1'b0, cq6[32:22], 1'b0, cq6[21:11], 1'b0, cq6[10:0]} : x6;
+    end
+    assign b_we = ulb_q;
+    assign b_widx = n7;
+    assign b_wdata = x7;
+    assign b_first = n7_first;
+    assign b_last = n7_last;
+    assign b_wep = jd_ul_ep;
+
     // Compare in two steps: the four 11-bit fields, then the verdict.
     reg cmp_v;
     reg [3:0] ne_q;
@@ -527,19 +517,17 @@ module mlkem_lane (
             ne_q[i] <= (cq6[11*i +: 11] != cr6[11*i +: 11]);
         if (!rst_n || kill) begin
             mp_we <= 1'b0;
-            c_we <= 1'b0;
             cmp_v <= 1'b0;
             diff <= 1'b0;
         end else begin
             mp_we <= v6 && posw;
-            c_we <= v6 && ul_noise && !jd_cmp;
             cmp_v <= v6 && ul_noise && jd_cmp;
             if (go)
                 diff <= 1'b0;
             else if (cmp_v && (ne_q != 4'd0))
                 diff <= 1'b1;
         end
-        c_wdata <= cq6;
+        mp_bits <= {cq6[33], cq6[22], cq6[11], cq6[0]};
     end
 
 endmodule
